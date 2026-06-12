@@ -1,0 +1,1 @@
+"""FunPay Cortex plugins package."""

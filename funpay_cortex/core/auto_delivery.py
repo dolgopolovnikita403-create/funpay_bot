@@ -1,6 +1,4 @@
-"""Модуль автоматической выдачи товаров для отдельного пользователя."""
 from __future__ import annotations
-
 import asyncio
 import logging
 from typing import TYPE_CHECKING
@@ -11,7 +9,6 @@ if TYPE_CHECKING:
     from core.funpay_api import FunPayAPI
 
 logger = logging.getLogger("AutoDelivery")
-
 
 class AutoDelivery:
     def __init__(self, config: ConfigManager, db: Database, funpay: FunPayAPI, telegram_id: int):
@@ -38,7 +35,7 @@ class AutoDelivery:
             return
         self._running = True
         self._task = asyncio.create_task(self._loop())
-        logger.info(f"🚀 AutoDelivery для пользователя {self.telegram_id} запущен.")
+        logger.info(f"🚀 AutoDelivery для {self.telegram_id} запущен.")
 
     async def stop(self) -> None:
         self._running = False
@@ -48,7 +45,7 @@ class AutoDelivery:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        logger.info(f"🛑 AutoDelivery для пользователя {self.telegram_id} остановлен.")
+        logger.info(f"🛑 AutoDelivery для {self.telegram_id} остановлен.")
 
     async def _loop(self) -> None:
         while self._running:
@@ -58,7 +55,7 @@ class AutoDelivery:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"AutoDelivery ошибка (пользователь {self.telegram_id}): {e}", exc_info=True)
+                logger.error(f"AutoDelivery ошибка ({self.telegram_id}): {e}", exc_info=True)
             await asyncio.sleep(15)
 
     async def _check_orders(self) -> None:
@@ -74,8 +71,7 @@ class AutoDelivery:
                 if order_id in self._processed_orders:
                     continue
 
-                # Проверяем, не обработан ли уже в БД
-                known = await self.db.is_order_known(order_id, self.telegram_id)  # метод с telegram_id
+                known = await self.db.is_order_known(order_id, self.telegram_id)
                 if known:
                     self._processed_orders.add(order_id)
                     continue
@@ -93,7 +89,7 @@ class AutoDelivery:
                     self._processed_orders.add(order_id)
                     await self._deliver(order)
         except Exception as e:
-            logger.error(f"Ошибка проверки заказов (пользователь {self.telegram_id}): {e}", exc_info=True)
+            logger.error(f"Ошибка проверки заказов ({self.telegram_id}): {e}", exc_info=True)
 
     async def _get_chat_id_by_username(self, username: str) -> str | None:
         try:
@@ -123,4 +119,4 @@ class AutoDelivery:
             else:
                 logger.error(f"❌ Не удалось отправить товар по заказу {order.id}")
         except Exception as e:
-            logger.error(f"Ошибка выдачи товара (пользователь {self.telegram_id}): {e}", exc_info=True)
+            logger.error(f"Ошибка выдачи товара ({self.telegram_id}): {e}", exc_info=True)

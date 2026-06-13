@@ -13,15 +13,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger("AutoResponder")
 
 # ============================================================
-# МЕГА-РАСШИРЕННЫЙ СЛОВАРЬ КЛЮЧЕВЫХ СЛОВ
+# РАСШИРЕННЫЙ СЛОВАРЬ КЛЮЧЕВЫХ СЛОВ
 # ============================================================
 
 _KEYWORD_MAP: dict[str, dict[str, list[str]]] = {
     "greeting": {
         "keywords": [
             "привет", "здравствуйте", "добрый день", "добрый вечер", "доброе утро",
-            "hello", "hi", "хай", "здрасте", "здравствуй", "приветствую", "салют",
-            "здорово", "хелло", "хей", "приветик", "ку", "здарова", "хаюшки"
+            "hello", "hi", "хай", "здрасте", "здравствуй", "доброго времени суток",
+            "добра", "приветствую", "салют", "здорово", "доброго дня", "доброго вечера",
+            "хелло", "хей", "приветик", "ку", "здарова", "хаюшки", "хэллоу"
         ],
         "template": "greeting"
     },
@@ -29,7 +30,8 @@ _KEYWORD_MAP: dict[str, dict[str, list[str]]] = {
         "keywords": [
             "оплатил", "заплатил", "оплата", "деньги", "перевод", "кинул", "отправил",
             "чек", "квитанция", "счёт оплачен", "заказ оплачен", "перевёл", "деньги ушли",
-            "оплачено", "платеж прошел"
+            "оплачено", "платеж прошел", "средства переведены", "оплатил заказ",
+            "денежки", "бабки", "перевел деньги", "отправил деньги", "кинул деньги"
         ],
         "template": "payment"
     },
@@ -37,7 +39,7 @@ _KEYWORD_MAP: dict[str, dict[str, list[str]]] = {
         "keywords": [
             "когда выдача", "когда получу", "сколько ждать", "время выдачи", "как быстро",
             "моментально", "автовыдача", "скоро выдашь", "когда будет", "через сколько",
-            "доставка", "получу товар", "скорость выдачи"
+            "доставка", "получу товар", "скорость выдачи", "выдача товара"
         ],
         "template": "delivery_time"
     },
@@ -51,7 +53,7 @@ _KEYWORD_MAP: dict[str, dict[str, list[str]]] = {
     "guarantee": {
         "keywords": [
             "гарантия", "возврат", "вернуть деньги", "refund", "гарантируешь", "какая гарантия",
-            "срок гарантии", "вернуть средства", "отмена заказа"
+            "срок гарантии", "гарантийный срок", "вернуть средства", "отмена заказа"
         ],
         "template": "guarantee"
     },
@@ -64,14 +66,14 @@ _KEYWORD_MAP: dict[str, dict[str, list[str]]] = {
     "discount": {
         "keywords": [
             "скидка", "торг", "дешевле", "уступишь", "нижняя цена", "подешевле",
-            "бонус", "акция", "распродажа", "дешево", "скидочку"
+            "бонус", "акция", "распродажа", "дешево", "уступите", "скидочку"
         ],
         "template": "discount"
     },
     "wholesale": {
         "keywords": [
             "оптом", "много", "несколько", "партия", "оптовая цена", "сколько есть",
-            "количество", "много штук", "пачкой", "навалом"
+            "количество", "много штук", "пачкой", "навалом", "большой заказ"
         ],
         "template": "wholesale"
     },
@@ -91,20 +93,20 @@ _KEYWORD_MAP: dict[str, dict[str, list[str]]] = {
     },
     "thanks": {
         "keywords": [
-            "спасибо", "благодарю", "спс", "пасиб", "thanks", "thank you", "помогло"
+            "спасибо", "благодарю", "спс", "пасиб", "thanks", "thank you", "благодарность"
         ],
         "template": "thanks"
     },
     "goodbye": {
         "keywords": [
             "пока", "до свидания", "удачи", "всего хорошего", "до связи",
-            "bye", "goodbye", "прощай", "всего доброго"
+            "bye", "goodbye", "прощай", "всего доброго", "счастливо"
         ],
         "template": "goodbye"
     },
     "help": {
         "keywords": [
-            "помоги", "нужна помощь", "помощь", "поддержка", "help", "что делать"
+            "помоги", "нужна помощь", "помощь", "поддержка", "help", "не понимаю"
         ],
         "template": "help"
     },
@@ -146,7 +148,7 @@ class AutoResponder:
             return
         self._running = True
         self._task = asyncio.create_task(self._loop())
-        logger.info("🚀 AutoResponder запущен")
+        logger.info("🚀 AutoResponder запущен.")
 
     async def stop(self) -> None:
         self._running = False
@@ -156,7 +158,7 @@ class AutoResponder:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        logger.info("🛑 AutoResponder остановлен")
+        logger.info("🛑 AutoResponder остановлен.")
 
     def _match_template(self, text: str) -> str | None:
         if not text:
@@ -179,56 +181,48 @@ class AutoResponder:
                 break
             except Exception as e:
                 logger.error(f"AutoResponder ошибка: {e}", exc_info=True)
-            await asyncio.sleep(3)
+            await asyncio.sleep(3)  # проверка каждые 3 секунды
 
     async def _check_messages(self) -> None:
         try:
             if not self.funpay.account:
                 await self.funpay.fetch_profile()
-            
             if not self.funpay.account:
                 return
-            
+
             chats = self.funpay.account.request_chats()
-            
             for chat in chats:
                 if not chat.unread:
                     continue
-                
+
                 history = await self.funpay.get_chat_history(chat.id)
                 if not history:
                     continue
-                
+
                 for msg in reversed(history):
                     if msg.get("author_id") == self.funpay.account.id:
                         continue
-                    
+
                     msg_text = msg.get("text", "")
                     if not msg_text:
                         continue
-                    
+
                     msg_key = f"{chat.id}:{msg.get('id')}"
                     if msg_key in self._answered_messages:
                         continue
-                    
-                    # Ищем ответ
+
                     reply = self._match_template(msg_text)
-                    
                     if not reply:
                         reply = self.config.get("AutoResponder", "no_match", "")
-                    
                     if reply:
                         success = await self.funpay.send_message(str(chat.id), reply)
                         if success:
                             self._answered_messages.add(msg_key)
                             logger.info(f"✅ Ответ в чат {chat.id}: {reply[:50]}...")
                             await asyncio.sleep(0.3)
-                    
-                    # ВАЖНО: выходим из цикла после обработки сообщения
-                    break
-                    
+                        break
+
             if len(self._answered_messages) > 500:
                 self._answered_messages = set(list(self._answered_messages)[-250:])
-                
         except Exception as e:
-            logger.error(f"Ошибка: {e}", exc_info=True)
+            logger.error(f"Ошибка проверки сообщений: {e}", exc_info=True)

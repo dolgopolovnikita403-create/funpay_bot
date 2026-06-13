@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 FunPay Cortex — Telegram-бот для автоматизации продаж на FunPay.
-Точка входа.
 """
 
 import asyncio
@@ -9,7 +8,6 @@ import logging
 import sys
 from pathlib import Path
 
-# ── Настройка директорий ─────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent
 LOGS_DIR = BASE_DIR / "logs"
 DATA_DIR = BASE_DIR / "data"
@@ -18,7 +16,6 @@ PLUGINS_DIR = BASE_DIR / "plugins"
 for d in (LOGS_DIR, DATA_DIR, PLUGINS_DIR):
     d.mkdir(exist_ok=True)
 
-# ── Логирование ──────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)-25s | %(message)s",
@@ -42,29 +39,22 @@ async def main() -> None:
     from core.plugin_manager import PluginManager
     from bot.telegram_bot import CortexBot
 
-    # 1. Конфиг
     config = ConfigManager(BASE_DIR / "config.ini")
-
-    # 2. БД
     db = Database(DATA_DIR / "database.db")
     await db.initialize()
 
-    # 3. FunPay API (главный админский, для управления ботом)
     admin_golden_key = config.get("FunPay", "golden_key")
     funpay = FunPayAPI(admin_golden_key)
     await funpay.fetch_profile()
 
-    # 4. Модули (админские)
     auto_delivery = AutoDelivery(config, db, funpay)
     auto_bump = AutoBump(config, funpay)
-    auto_responder = AutoResponder(config, funpay)
+    auto_responder = AutoResponder(config, funpay, db)   # ← передаём db
     online_keeper = OnlineKeeper(config, funpay)
 
-    # 5. Плагины
     plugin_manager = PluginManager(PLUGINS_DIR)
     plugin_manager.discover()
 
-    # 6. Telegram-бот
     bot = CortexBot(
         config=config,
         db=db,
@@ -78,7 +68,7 @@ async def main() -> None:
 
     token = config.get("Telegram", "bot_token")
     if not token:
-        logger.error("Telegram bot_token не задан! Укажите в config.ini")
+        logger.error("Telegram bot_token не задан!")
         print("\n⚠️  Укажите bot_token в config.ini → [Telegram] → bot_token\n")
         return
 

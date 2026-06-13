@@ -6,7 +6,6 @@ FunPay Cortex — Telegram-бот для автоматизации продаж
 
 import asyncio
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -50,10 +49,12 @@ async def main() -> None:
     db = Database(DATA_DIR / "database.db")
     await db.initialize()
 
-    # 3. FunPay API
-    funpay = FunPayAPI(config)
+    # 3. FunPay API (главный админский, для управления ботом)
+    admin_golden_key = config.get("FunPay", "golden_key")
+    funpay = FunPayAPI(admin_golden_key)
+    await funpay.fetch_profile()
 
-    # 4. Модули
+    # 4. Модули (админские)
     auto_delivery = AutoDelivery(config, db, funpay)
     auto_bump = AutoBump(config, funpay)
     auto_responder = AutoResponder(config, funpay)
@@ -77,8 +78,8 @@ async def main() -> None:
 
     token = config.get("Telegram", "bot_token")
     if not token:
-        logger.error("Telegram bot_token не задан! Выполните /setup в боте или укажите в config.ini")
-        print("\n⚠️  Укажите bot_token в config.ini → [Telegram] → bot_token и admin_id, затем перезапустите.\n")
+        logger.error("Telegram bot_token не задан! Укажите в config.ini")
+        print("\n⚠️  Укажите bot_token в config.ini → [Telegram] → bot_token\n")
         return
 
     logger.info("🚀 FunPay Cortex запускается…")

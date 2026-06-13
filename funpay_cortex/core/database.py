@@ -1,4 +1,4 @@
-"""SQLite-хранилище с поддержкой пользователей и подписок."""
+"""SQLite-хранилище с поддержкой пользователей, подписок, заказов и товаров."""
 from __future__ import annotations
 
 import sqlite3
@@ -107,7 +107,7 @@ class Database:
                 return [dict(row) for row in cur.fetchall()]
         return await run_sync(_fetch_all)
 
-    # ------------------ ПОЛЬЗОВАТЕЛИ ------------------
+    # ------------------ ПОЛЬЗОВАТЕЛИ И ПОДПИСКИ ------------------
     async def get_user(self, telegram_id: int) -> dict | None:
         return await self.fetch_one("SELECT * FROM bot_users WHERE telegram_id = ?", (telegram_id,))
 
@@ -142,7 +142,8 @@ class Database:
         except:
             return False
 
-    async def get_active_users(self) -> list[dict]:
+    async def get_all_active_users(self) -> list[dict]:
+        """Возвращает всех пользователей с активной подпиской (subscription_end > текущая дата)."""
         return await self.fetch_all("SELECT * FROM bot_users WHERE subscription_end > datetime('now')")
 
     # ------------------ ЗАКАЗЫ ------------------
@@ -167,7 +168,7 @@ class Database:
         row = await self.fetch_one("SELECT 1 FROM orders WHERE order_id = ?", (order_id,))
         return row is not None
 
-    # ------------------ ТОВАРЫ ------------------
+    # ------------------ ТОВАРЫ ДЛЯ АВТОВЫДАЧИ ------------------
     async def add_product(self, lot_name: str, content: str) -> int:
         await self.execute("INSERT INTO products (lot_name, content) VALUES (?, ?)", (lot_name, content))
         row = await self.fetch_one("SELECT last_insert_rowid() as id")
@@ -197,13 +198,14 @@ class Database:
     # ------------------ СТАТИСТИКА ------------------
     async def get_stats(self, period: str = "all") -> dict[str, Any]:
         now = datetime.utcnow()
-        since = "2000-01-01T00:00:00"
         if period == "day":
             since = (now - timedelta(days=1)).isoformat()
         elif period == "week":
             since = (now - timedelta(weeks=1)).isoformat()
         elif period == "month":
             since = (now - timedelta(days=30)).isoformat()
+        else:
+            since = "2000-01-01T00:00:00"
         row = await self.fetch_one("SELECT COUNT(*) as cnt, COALESCE(SUM(amount), 0) as total FROM orders WHERE created_at >= ?", (since,))
         d_row = await self.fetch_one("SELECT COUNT(*) as cnt FROM orders WHERE delivered = 1 AND created_at >= ?", (since,))
         return {

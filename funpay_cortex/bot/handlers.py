@@ -191,7 +191,14 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Ошибка загрузки профиля. Проверьте golden_key.")
         return
     lots = await api.fetch_lots()
-    text = f"👤 *Профиль FunPay*\nИмя: {profile.username}\nID: {profile.id}\nБаланс: {profile.balance}\nАктивных лотов: {len(lots)}"
+    # Получаем баланс через get_balance()
+    try:
+        balance_obj = await api.account.get_balance()
+        balance_str = f"{balance_obj.available_rub:.2f} ₽"
+    except Exception as e:
+        logger.error(f"Ошибка получения баланса: {e}")
+        balance_str = "не удалось получить"
+    text = f"👤 *Профиль FunPay*\nИмя: {profile.username}\nID: {profile.id}\nБаланс: {balance_str}\nАктивных лотов: {len(lots)}"
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=back_kb())
 
 

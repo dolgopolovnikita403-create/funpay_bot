@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""
-FunPay Cortex — Telegram-бот для автоматизации продаж на FunPay.
-"""
-
 import asyncio
 import logging
 import sys
@@ -32,38 +28,29 @@ async def main() -> None:
     from core.config_manager import ConfigManager
     from core.database import Database
     from core.funpay_api import FunPayAPI
-    from core.auto_delivery import AutoDelivery
-    from core.auto_bump import AutoBump
-    from core.auto_responder import AutoResponder
-    from core.online_keeper import OnlineKeeper
-    from core.plugin_manager import PluginManager
+    from core.user_module_manager import UserModuleManager
     from bot.telegram_bot import CortexBot
 
     config = ConfigManager(BASE_DIR / "config.ini")
     db = Database(DATA_DIR / "database.db")
     await db.initialize()
 
+    # Админский экземпляр для общих команд (не обязателен)
     admin_golden_key = config.get("FunPay", "golden_key")
-    funpay = FunPayAPI(admin_golden_key)
-    await funpay.fetch_profile()
+    funpay_admin = FunPayAPI(admin_golden_key)
+    await funpay_admin.fetch_profile()
 
-    auto_delivery = AutoDelivery(config, db, funpay)
-    auto_bump = AutoBump(config, funpay)
-    auto_responder = AutoResponder(config, funpay, db)   # ← передаём db
-    online_keeper = OnlineKeeper(config, funpay)
+    # Менеджер пользовательских модулей
+    user_module_manager = UserModuleManager(db)
 
-    plugin_manager = PluginManager(PLUGINS_DIR)
-    plugin_manager.discover()
+    # Запуск модулей для всех активных пользователей при старте бота
+    await user_module_manager.start_all_active_users(config)
 
     bot = CortexBot(
         config=config,
         db=db,
-        funpay=funpay,
-        auto_delivery=auto_delivery,
-        auto_bump=auto_bump,
-        auto_responder=auto_responder,
-        online_keeper=online_keeper,
-        plugin_manager=plugin_manager,
+        funpay_admin=funpay_admin,
+        user_module_manager=user_module_manager,
     )
 
     token = config.get("Telegram", "bot_token")

@@ -1,11 +1,8 @@
 FROM python:3.11-slim
 
-WORKDIR /app
+WORKDIR /app2
 
-# Метка для принудительной пересборки
-LABEL version="2.0"
-
-COPY funpay_cortex/ /app/
+COPY funpay_cortex/ /app2/
 
 RUN pip install --no-cache-dir -r requirements.txt
 

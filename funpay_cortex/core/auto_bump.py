@@ -1,6 +1,4 @@
-"""Модуль автоматического поднятия лотов для отдельного пользователя."""
 from __future__ import annotations
-
 import asyncio
 import logging
 from typing import TYPE_CHECKING
@@ -12,10 +10,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("AutoBump")
 
-
 class AutoBump:
-    def __init__(self, config: ConfigManager, funpay: FunPayAPI, telegram_id: int):
+    def __init__(self, config: ConfigManager, db: Database, funpay: FunPayAPI, telegram_id: int):
         self.config = config
+        self.db = db
         self.funpay = funpay
         self.telegram_id = telegram_id
         self._running = False
@@ -44,7 +42,7 @@ class AutoBump:
         self._running = True
         self._task = asyncio.create_task(self._loop())
         interval = await self.interval_hours()
-        logger.info(f"🚀 AutoBump для пользователя {self.telegram_id} запущен (интервал {interval} ч).")
+        logger.info(f"🚀 AutoBump для {self.telegram_id} запущен (интервал {interval} ч).")
 
     async def stop(self) -> None:
         self._running = False
@@ -54,7 +52,7 @@ class AutoBump:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        logger.info(f"🛑 AutoBump для пользователя {self.telegram_id} остановлен.")
+        logger.info(f"🛑 AutoBump для {self.telegram_id} остановлен.")
 
     async def bump_now(self) -> tuple[bool, str]:
         success, msg = await self.funpay.bump_lots()
@@ -73,12 +71,12 @@ class AutoBump:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"AutoBump ошибка (пользователь {self.telegram_id}): {e}", exc_info=True)
+                logger.error(f"AutoBump ошибка ({self.telegram_id}): {e}", exc_info=True)
             interval = await self.interval_hours()
             await asyncio.sleep(interval * 3600)
 
     @property
     def last_bump(self) -> str:
         if self._last_bump:
-            return asyncio.get_event_loop().time()
+            return "недавно"
         return "никогда"

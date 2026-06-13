@@ -21,7 +21,7 @@ class AutoDelivery:
         self.telegram_id = telegram_id
         self._running = False
         self._task: asyncio.Task | None = None
-        self._processed_orders: set[str] = set()  # локально для пользователя
+        self._processed_orders: set[str] = set()
 
     @property
     async def enabled(self) -> bool:
@@ -73,22 +73,25 @@ class AutoDelivery:
                 order_id = order.id
                 if order_id in self._processed_orders:
                     continue
-                if await self.db.is_order_known(order_id):
+
+                # Проверяем, не обработан ли уже в БД
+                known = await self.db.is_order_known(order_id, self.telegram_id)  # метод с telegram_id
+                if known:
                     self._processed_orders.add(order_id)
                     continue
-                # Сохраняем заказ в БД (глобально, но можно добавить telegram_id)
+
                 await self.db.add_order(
                     order_id=order_id,
                     buyer=order.buyer_username,
                     lot_name=order.description,
                     amount=order.price,
                     status=order.status.name if hasattr(order.status, 'name') else str(order.status),
+                    telegram_id=self.telegram_id
                 )
-                # Если заказ оплачен
+
                 if order.status.name == "PAID" or "paid" in str(order.status).lower():
                     self._processed_orders.add(order_id)
                     await self._deliver(order)
-
         except Exception as e:
             logger.error(f"Ошибка проверки заказов (пользователь {self.telegram_id}): {e}", exc_info=True)
 
@@ -103,17 +106,21 @@ class AutoDelivery:
 
     async def _deliver(self, order) -> None:
         try:
-            product = await self.db.get_product(order.description, self.telegram_id)  # нужно модифицировать get_product
+            product = await self.db.get_product(order.description, self.telegram_id)
             if product is None:
-                logger.warning(f"⚠️ Нет товаров для лота '{order.description}' (пользователь {self.telegram_id}, заказ {order.id})")
+                logger.warning(f"⚠️ Нет товаров для лота '{order.description}' (пользователь {self.telegram_id})")
                 return
+
             chat_id = await self._get_chat_id_by_username(order.buyer_username)
             if not chat_id:
                 chat_id = f"order-{order.id}"
+
             message = f"✅ *Ваш товар по заказу #{order.id}*\n\n{product}\n\nСпасибо за покупку!"
             sent = await self.funpay.send_message(chat_id, message)
             if sent:
-                await self.db.mark_delivered(order.id)
-                logger.info(f"✅ Товар выдан пользователем {self.telegram_id}: заказ {order.id}")
+                await self.db.mark_delivered(order.id, self.telegram_id)
+                logger.info(f"✅ Товар выдан пользователем {self.telegram_id}, заказ {order.id}")
+            else:
+                logger.error(f"❌ Не удалось отправить товар по заказу {order.id}")
         except Exception as e:
             logger.error(f"Ошибка выдачи товара (пользователь {self.telegram_id}): {e}", exc_info=True)

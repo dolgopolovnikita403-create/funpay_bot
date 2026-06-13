@@ -1,54 +1,50 @@
-"""Модуль автоматического поднятия лотов."""
-
+"""Модуль автоматического поднятия лотов для отдельного пользователя."""
 from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
-from typing import TYPE_CHECKING, Callable, Coroutine, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from core.config_manager import ConfigManager
+    from core.database import Database
     from core.funpay_api import FunPayAPI
 
 logger = logging.getLogger("AutoBump")
 
 
 class AutoBump:
-    def __init__(self, config: ConfigManager, funpay: FunPayAPI) -> None:
+    def __init__(self, config: ConfigManager, funpay: FunPayAPI, telegram_id: int):
         self.config = config
         self.funpay = funpay
+        self.telegram_id = telegram_id
         self._running = False
         self._task: asyncio.Task | None = None
-        self._last_bump: datetime | None = None
-        self._bump_callbacks: list[Callable[..., Coroutine[Any, Any, None]]] = []
+        self._last_bump = None
 
     @property
-    def enabled(self) -> bool:
-        return self.config.getbool("Settings", "auto_bump")
+    async def enabled(self) -> bool:
+        return await self.db.get_module_state(self.telegram_id, "auto_bump")
 
-    @property
-    def interval_hours(self) -> float:
-        return self.config.getfloat("Settings", "bump_interval", 4.0)
+    async def enable(self) -> None:
+        await self.db.set_module_state(self.telegram_id, "auto_bump", True)
 
-    def enable(self) -> None:
-        self.config.set("Settings", "auto_bump", "on")
+    async def disable(self) -> None:
+        await self.db.set_module_state(self.telegram_id, "auto_bump", False)
 
-    def disable(self) -> None:
-        self.config.set("Settings", "auto_bump", "off")
+    async def interval_hours(self) -> float:
+        return await self.db.get_user_bump_interval(self.telegram_id)
 
-    def set_interval(self, hours: float) -> None:
-        self.config.set("Settings", "bump_interval", str(hours))
-
-    def on_bump(self, callback) -> None:
-        self._bump_callbacks.append(callback)
+    async def set_interval(self, hours: float) -> None:
+        await self.db.set_user_bump_interval(self.telegram_id, hours)
 
     async def start(self) -> None:
         if self._running:
             return
         self._running = True
         self._task = asyncio.create_task(self._loop())
-        logger.info("AutoBump запущен (интервал: %.1f ч).", self.interval_hours)
+        interval = await self.interval_hours()
+        logger.info(f"🚀 AutoBump для пользователя {self.telegram_id} запущен (интервал {interval} ч).")
 
     async def stop(self) -> None:
         self._running = False
@@ -58,33 +54,31 @@ class AutoBump:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        logger.info("AutoBump остановлен.")
+        logger.info(f"🛑 AutoBump для пользователя {self.telegram_id} остановлен.")
 
     async def bump_now(self) -> tuple[bool, str]:
         success, msg = await self.funpay.bump_lots()
-        self._last_bump = datetime.utcnow()
-        for cb in self._bump_callbacks:
-            await cb(success, msg)
+        self._last_bump = asyncio.get_event_loop().time()
         return success, msg
 
     async def _loop(self) -> None:
         while self._running:
             try:
-                if self.enabled:
+                if await self.enabled:
                     success, msg = await self.bump_now()
                     if success:
-                        logger.info("Лоты подняты: %s", msg)
+                        logger.info(f"✅ Пользователь {self.telegram_id}: {msg}")
                     else:
-                        logger.warning("Ошибка поднятия: %s", msg)
+                        logger.warning(f"⚠️ Пользователь {self.telegram_id}: ошибка поднятия: {msg}")
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error("AutoBump ошибка: %s", e, exc_info=True)
-
-            await asyncio.sleep(self.interval_hours * 3600)
+                logger.error(f"AutoBump ошибка (пользователь {self.telegram_id}): {e}", exc_info=True)
+            interval = await self.interval_hours()
+            await asyncio.sleep(interval * 3600)
 
     @property
     def last_bump(self) -> str:
         if self._last_bump:
-            return self._last_bump.strftime("%Y-%m-%d %H:%M:%S UTC")
+            return asyncio.get_event_loop().time()
         return "никогда"

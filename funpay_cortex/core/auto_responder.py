@@ -1,12 +1,12 @@
-"""Автоответчик — отвечает на частые вопросы в чатах по шаблонам."""
-
+"""Автоответчик — мульти-аккаунтная версия (для каждого пользователя своя сессия)."""
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
+    from core.database import Database
     from core.config_manager import ConfigManager
     from core.funpay_api import FunPayAPI
 
@@ -126,12 +126,12 @@ _KEYWORD_MAP: dict[str, dict[str, list[str]]] = {
 
 
 class AutoResponder:
-    def __init__(self, config: ConfigManager, funpay: FunPayAPI) -> None:
+    def __init__(self, config: ConfigManager, funpay: FunPayAPI, db: Database):
         self.config = config
-        self.funpay = funpay
+        self.funpay = funpay  # админский (не используется, оставлен для совместимости)
+        self.db = db
         self._running = False
         self._task: asyncio.Task | None = None
-        self._answered_messages: set[str] = set()
 
     @property
     def enabled(self) -> bool:
@@ -147,8 +147,8 @@ class AutoResponder:
         if self._running:
             return
         self._running = True
-        self._task = asyncio.create_task(self._loop())
-        logger.info("🚀 AutoResponder запущен.")
+        self._task = asyncio.create_task(self._main_loop())
+        logger.info("🚀 Мульти-аккаунтный AutoResponder запущен.")
 
     async def stop(self) -> None:
         self._running = False
@@ -158,71 +158,91 @@ class AutoResponder:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        logger.info("🛑 AutoResponder остановлен.")
+        logger.info("🛑 Мульти-аккаунтный AutoResponder остановлен.")
 
-    def _match_template(self, text: str) -> str | None:
+    async def _main_loop(self) -> None:
+        """Основной цикл: раз в минуту получает активных пользователей и обрабатывает их."""
+        while self._running:
+            try:
+                # Получаем всех пользователей с активной подпиской
+                users = await self.db.get_all_active_users()
+                if not users:
+                    await asyncio.sleep(30)
+                    continue
+
+                logger.debug(f"Обработка {len(users)} активных пользователей.")
+                for user in users:
+                    if not self._running:
+                        break
+                    # Создаём экземпляр FunPayAPI для этого пользователя
+                    user_api = FunPayAPI(user["golden_key"])
+                    await self._process_user(user_api)
+
+                    # Задержка между пользователями, чтобы не перегружать FunPay
+                    await asyncio.sleep(5)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Ошибка в основном цикле: {e}", exc_info=True)
+
+            # Пауза перед следующим полным циклом (1 минута)
+            await asyncio.sleep(60)
+
+    async def _process_user(self, funpay: FunPayAPI) -> None:
+        """Обрабатывает сообщения для одного пользователя (аккаунта FunPay)."""
+        try:
+            # Инициализируем аккаунт пользователя
+            if not funpay.account:
+                await funpay.fetch_profile()
+            if not funpay.account or not funpay.account.csrf_token:
+                logger.warning(f"Не удалось инициализировать аккаунт с ключом {funpay.golden_key[:8]}...")
+                return
+
+            # Получаем список чатов
+            chats = funpay.account.request_chats()
+            if not chats:
+                return
+
+            for chat in chats:
+                if not chat.unread:
+                    continue
+
+                logger.info(f"📬 Непрочитанное сообщение для {funpay.username} в чате {chat.id} от {chat.name}")
+
+                # Получаем историю чата
+                history = await funpay.get_chat_history(chat.id)
+                if not history:
+                    continue
+
+                for msg in reversed(history):
+                    # Пропускаем сообщения от самого себя
+                    if msg.get("author_id") == funpay.account.id:
+                        continue
+                    msg_text = msg.get("text", "")
+                    if not msg_text:
+                        continue
+
+                    # Генерируем ответ
+                    reply = self._generate_reply(msg_text)
+                    if not reply:
+                        reply = self.config.get("AutoResponder", "no_match", "")
+                    if reply:
+                        sent = await funpay.send_message(str(chat.id), reply)
+                        if sent:
+                            logger.info(f"✅ Автоответ отправлен от {funpay.username} в чат {chat.id}")
+                            break  # отвечаем только на одно сообщение за раз
+
+        except Exception as e:
+            logger.error(f"Ошибка обработки пользователя: {e}", exc_info=True)
+
+    def _generate_reply(self, text: str) -> str | None:
+        """Генерирует ответ на основе ключевых слов."""
         if not text:
             return None
         text_lower = text.lower().strip()
         for category, data in _KEYWORD_MAP.items():
             for keyword in data["keywords"]:
                 if keyword in text_lower:
-                    reply = self.config.get("AutoResponder", data["template"], "")
-                    if reply:
-                        return reply
+                    return self.config.get("AutoResponder", data["template"], "")
         return None
-
-    async def _loop(self) -> None:
-        while self._running:
-            try:
-                if self.enabled:
-                    await self._check_messages()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"AutoResponder ошибка: {e}", exc_info=True)
-            await asyncio.sleep(3)  # проверка каждые 3 секунды
-
-    async def _check_messages(self) -> None:
-        try:
-            if not self.funpay.account:
-                await self.funpay.fetch_profile()
-            if not self.funpay.account:
-                return
-
-            chats = self.funpay.account.request_chats()
-            for chat in chats:
-                if not chat.unread:
-                    continue
-
-                history = await self.funpay.get_chat_history(chat.id)
-                if not history:
-                    continue
-
-                for msg in reversed(history):
-                    if msg.get("author_id") == self.funpay.account.id:
-                        continue
-
-                    msg_text = msg.get("text", "")
-                    if not msg_text:
-                        continue
-
-                    msg_key = f"{chat.id}:{msg.get('id')}"
-                    if msg_key in self._answered_messages:
-                        continue
-
-                    reply = self._match_template(msg_text)
-                    if not reply:
-                        reply = self.config.get("AutoResponder", "no_match", "")
-                    if reply:
-                        success = await self.funpay.send_message(str(chat.id), reply)
-                        if success:
-                            self._answered_messages.add(msg_key)
-                            logger.info(f"✅ Ответ в чат {chat.id}: {reply[:50]}...")
-                            await asyncio.sleep(0.3)
-                        break
-
-            if len(self._answered_messages) > 500:
-                self._answered_messages = set(list(self._answered_messages)[-250:])
-        except Exception as e:
-            logger.error(f"Ошибка проверки сообщений: {e}", exc_info=True)

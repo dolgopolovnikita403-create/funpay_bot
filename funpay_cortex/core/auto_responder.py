@@ -1,4 +1,4 @@
-"""Автоответчик — мульти-аккаунтная версия (для каждого пользователя своя сессия)."""
+"""Автоответчик — для отдельного пользователя (мульти-аккаунтная версия)."""
 from __future__ import annotations
 
 import asyncio
@@ -126,29 +126,31 @@ _KEYWORD_MAP: dict[str, dict[str, list[str]]] = {
 
 
 class AutoResponder:
-    def __init__(self, config: ConfigManager, funpay: FunPayAPI, db: Database):
+    def __init__(self, config: ConfigManager, funpay: FunPayAPI, db: Database, telegram_id: int):
         self.config = config
-        self.funpay = funpay  # админский (не используется, оставлен для совместимости)
+        self.funpay = funpay
         self.db = db
+        self.telegram_id = telegram_id
         self._running = False
         self._task: asyncio.Task | None = None
+        self._answered_messages: set[str] = set()  # локальное хранилище для этого пользователя
 
     @property
-    def enabled(self) -> bool:
-        return self.config.getbool("Settings", "auto_responder")
+    async def enabled(self) -> bool:
+        return await self.db.get_module_state(self.telegram_id, "auto_responder")
 
-    def enable(self) -> None:
-        self.config.set("Settings", "auto_responder", "on")
+    async def enable(self) -> None:
+        await self.db.set_module_state(self.telegram_id, "auto_responder", True)
 
-    def disable(self) -> None:
-        self.config.set("Settings", "auto_responder", "off")
+    async def disable(self) -> None:
+        await self.db.set_module_state(self.telegram_id, "auto_responder", False)
 
     async def start(self) -> None:
         if self._running:
             return
         self._running = True
-        self._task = asyncio.create_task(self._main_loop())
-        logger.info("🚀 Мульти-аккаунтный AutoResponder запущен.")
+        self._task = asyncio.create_task(self._loop())
+        logger.info(f"🚀 AutoResponder для пользователя {self.telegram_id} запущен.")
 
     async def stop(self) -> None:
         self._running = False
@@ -158,75 +160,9 @@ class AutoResponder:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        logger.info("🛑 Мульти-аккаунтный AutoResponder остановлен.")
+        logger.info(f"🛑 AutoResponder для пользователя {self.telegram_id} остановлен.")
 
-    async def _main_loop(self) -> None:
-        """Основной цикл: раз в минуту получает активных пользователей и обрабатывает их."""
-        while self._running:
-            try:
-                users = await self.db.get_all_active_users()
-                if not users:
-                    await asyncio.sleep(30)
-                    continue
-
-                logger.debug(f"Обработка {len(users)} активных пользователей.")
-                for user in users:
-                    if not self._running:
-                        break
-                    user_api = FunPayAPI(user["golden_key"])
-                    await self._process_user(user_api)
-                    await asyncio.sleep(5)  # пауза между пользователями
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Ошибка в основном цикле: {e}", exc_info=True)
-
-            await asyncio.sleep(60)  # пауза перед новым циклом
-
-    async def _process_user(self, funpay: FunPayAPI) -> None:
-        """Обрабатывает сообщения для одного пользователя (аккаунта FunPay)."""
-        try:
-            if not funpay.account:
-                await funpay.fetch_profile()
-            if not funpay.account or not funpay.account.csrf_token:
-                logger.warning(f"Не удалось инициализировать аккаунт с ключом {funpay.golden_key[:8]}...")
-                return
-
-            chats = funpay.account.request_chats()
-            if not chats:
-                return
-
-            for chat in chats:
-                if not chat.unread:
-                    continue
-
-                logger.info(f"📬 Непрочитанное сообщение для {funpay.username} в чате {chat.id} от {chat.name}")
-
-                history = await funpay.get_chat_history(chat.id)
-                if not history:
-                    continue
-
-                for msg in reversed(history):
-                    if msg.get("author_id") == funpay.account.id:
-                        continue
-                    msg_text = msg.get("text", "")
-                    if not msg_text:
-                        continue
-
-                    reply = self._generate_reply(msg_text)
-                    if not reply:
-                        reply = self.config.get("AutoResponder", "no_match", "")
-                    if reply:
-                        sent = await funpay.send_message(str(chat.id), reply)
-                        if sent:
-                            logger.info(f"✅ Автоответ отправлен от {funpay.username} в чат {chat.id}")
-                            break
-
-        except Exception as e:
-            logger.error(f"Ошибка обработки пользователя: {e}", exc_info=True)
-
-    def _generate_reply(self, text: str) -> str | None:
+    def _match_template(self, text: str) -> str | None:
         if not text:
             return None
         text_lower = text.lower().strip()
@@ -235,3 +171,58 @@ class AutoResponder:
                 if keyword in text_lower:
                     return self.config.get("AutoResponder", data["template"], "")
         return None
+
+    async def _loop(self) -> None:
+        while self._running:
+            try:
+                if await self.enabled:
+                    await self._check_messages()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"AutoResponder ошибка (пользователь {self.telegram_id}): {e}", exc_info=True)
+            await asyncio.sleep(3)  # проверка каждые 3 секунды
+
+    async def _check_messages(self) -> None:
+        try:
+            if not self.funpay.account:
+                await self.funpay.fetch_profile()
+            if not self.funpay.account:
+                return
+
+            chats = self.funpay.account.request_chats()
+            for chat in chats:
+                if not chat.unread:
+                    continue
+
+                history = await self.funpay.get_chat_history(chat.id)
+                if not history:
+                    continue
+
+                for msg in reversed(history):
+                    if msg.get("author_id") == self.funpay.account.id:
+                        continue
+
+                    msg_text = msg.get("text", "")
+                    if not msg_text:
+                        continue
+
+                    msg_key = f"{chat.id}:{msg.get('id')}"
+                    if msg_key in self._answered_messages:
+                        continue
+
+                    reply = self._match_template(msg_text)
+                    if not reply:
+                        reply = self.config.get("AutoResponder", "no_match", "")
+                    if reply:
+                        sent = await self.funpay.send_message(str(chat.id), reply)
+                        if sent:
+                            self._answered_messages.add(msg_key)
+                            logger.info(f"✅ Автоответ отправлен пользователем {self.telegram_id} в чат {chat.id}")
+                            await asyncio.sleep(0.3)
+                        break
+
+            if len(self._answered_messages) > 500:
+                self._answered_messages = set(list(self._answered_messages)[-250:])
+        except Exception as e:
+            logger.error(f"Ошибка проверки сообщений (пользователь {self.telegram_id}): {e}", exc_info=True)

@@ -1,6 +1,5 @@
 """Асинхронный клиент для FunPay (работает с конкретным golden_key)."""
 import logging
-import json
 import requests
 from bs4 import BeautifulSoup
 from FunPayAPI import Account

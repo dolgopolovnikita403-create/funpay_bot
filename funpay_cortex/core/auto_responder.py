@@ -164,7 +164,6 @@ class AutoResponder:
         """Основной цикл: раз в минуту получает активных пользователей и обрабатывает их."""
         while self._running:
             try:
-                # Получаем всех пользователей с активной подпиской
                 users = await self.db.get_all_active_users()
                 if not users:
                     await asyncio.sleep(30)
@@ -174,32 +173,26 @@ class AutoResponder:
                 for user in users:
                     if not self._running:
                         break
-                    # Создаём экземпляр FunPayAPI для этого пользователя
                     user_api = FunPayAPI(user["golden_key"])
                     await self._process_user(user_api)
-
-                    # Задержка между пользователями, чтобы не перегружать FunPay
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(5)  # пауза между пользователями
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Ошибка в основном цикле: {e}", exc_info=True)
 
-            # Пауза перед следующим полным циклом (1 минута)
-            await asyncio.sleep(60)
+            await asyncio.sleep(60)  # пауза перед новым циклом
 
     async def _process_user(self, funpay: FunPayAPI) -> None:
         """Обрабатывает сообщения для одного пользователя (аккаунта FunPay)."""
         try:
-            # Инициализируем аккаунт пользователя
             if not funpay.account:
                 await funpay.fetch_profile()
             if not funpay.account or not funpay.account.csrf_token:
                 logger.warning(f"Не удалось инициализировать аккаунт с ключом {funpay.golden_key[:8]}...")
                 return
 
-            # Получаем список чатов
             chats = funpay.account.request_chats()
             if not chats:
                 return
@@ -210,20 +203,17 @@ class AutoResponder:
 
                 logger.info(f"📬 Непрочитанное сообщение для {funpay.username} в чате {chat.id} от {chat.name}")
 
-                # Получаем историю чата
                 history = await funpay.get_chat_history(chat.id)
                 if not history:
                     continue
 
                 for msg in reversed(history):
-                    # Пропускаем сообщения от самого себя
                     if msg.get("author_id") == funpay.account.id:
                         continue
                     msg_text = msg.get("text", "")
                     if not msg_text:
                         continue
 
-                    # Генерируем ответ
                     reply = self._generate_reply(msg_text)
                     if not reply:
                         reply = self.config.get("AutoResponder", "no_match", "")
@@ -231,13 +221,12 @@ class AutoResponder:
                         sent = await funpay.send_message(str(chat.id), reply)
                         if sent:
                             logger.info(f"✅ Автоответ отправлен от {funpay.username} в чат {chat.id}")
-                            break  # отвечаем только на одно сообщение за раз
+                            break
 
         except Exception as e:
             logger.error(f"Ошибка обработки пользователя: {e}", exc_info=True)
 
     def _generate_reply(self, text: str) -> str | None:
-        """Генерирует ответ на основе ключевых слов."""
         if not text:
             return None
         text_lower = text.lower().strip()

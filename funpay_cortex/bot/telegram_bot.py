@@ -144,11 +144,9 @@ class CortexBot:
             await self._shutdown()
 
     async def pre_checkout_query(self, update, context):
-        """Подтверждение предоплаты."""
         await update.pre_checkout_query.answer(ok=True)
 
     async def successful_payment(self, update, context):
-        """Активация Premium после успешной оплаты."""
         user_id = update.effective_user.id
         await self.subscription_manager.activate_premium(user_id, 30)
         await update.message.reply_text("✅ Premium активирован на 30 дней! Спасибо за покупку!")

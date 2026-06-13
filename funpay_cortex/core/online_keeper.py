@@ -1,6 +1,4 @@
-"""Поддержание статуса онлайн для отдельного пользователя."""
 from __future__ import annotations
-
 import asyncio
 import logging
 from typing import TYPE_CHECKING
@@ -12,9 +10,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("OnlineKeeper")
 
-
 class OnlineKeeper:
-    PING_INTERVAL = 60  # секунд
+    PING_INTERVAL = 60
 
     def __init__(self, config: ConfigManager, db: Database, funpay: FunPayAPI, telegram_id: int):
         self.config = config
@@ -39,7 +36,7 @@ class OnlineKeeper:
             return
         self._running = True
         self._task = asyncio.create_task(self._loop())
-        logger.info(f"🚀 OnlineKeeper для пользователя {self.telegram_id} запущен.")
+        logger.info(f"🚀 OnlineKeeper для {self.telegram_id} запущен.")
 
     async def stop(self) -> None:
         self._running = False
@@ -49,7 +46,7 @@ class OnlineKeeper:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        logger.info(f"🛑 OnlineKeeper для пользователя {self.telegram_id} остановлен.")
+        logger.info(f"🛑 OnlineKeeper для {self.telegram_id} остановлен.")
 
     async def _loop(self) -> None:
         while self._running:
@@ -63,5 +60,5 @@ class OnlineKeeper:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"OnlineKeeper ошибка (пользователь {self.telegram_id}): {e}", exc_info=True)
+                logger.error(f"OnlineKeeper ошибка ({self.telegram_id}): {e}", exc_info=True)
             await asyncio.sleep(self.PING_INTERVAL)

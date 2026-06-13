@@ -1,14 +1,15 @@
-"""Обработчики команд и callback-запросов Telegram-бота."""
-
+"""Обработчики команд и callback-запросов Telegram-бота. Полная версия с подписками."""
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import TYPE_CHECKING
 
-from telegram import Update
+from telegram import Update, LabeledPrice
 from telegram.ext import ContextTypes
 
 from bot.keyboards import main_menu_kb, settings_kb, stat_period_kb, back_kb
+from core.funpay_api import FunPayAPI
 
 if TYPE_CHECKING:
     from bot.telegram_bot import CortexBot
@@ -17,12 +18,12 @@ logger = logging.getLogger("Handlers")
 
 LOGO = """
 ╔═══════════════════════════════════╗
-║   🧠  FunPay Cortex  v1.0        ║
+║   🧠  FunPay Cortex  v2.0        ║
 ║   Автоматизация продаж FunPay    ║
 ╚═══════════════════════════════════╝
 """
 
-
+# ---------- Вспомогательные функции ----------
 def is_admin(bot_ref: CortexBot, user_id: int) -> bool:
     admin_id = bot_ref.config.get("Telegram", "admin_id")
     if not admin_id:
@@ -41,296 +42,259 @@ def admin_only(func):
     return wrapper
 
 
-# ═══════════════════════════════════════════════════════════════════
-# ОСНОВНЫЕ КОМАНДЫ
-# ═══════════════════════════════════════════════════════════════════
+def requires_golden_key(func):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        bot_ref: CortexBot = context.bot_data["cortex"]
+        user_id = update.effective_user.id
+        user = await bot_ref.db.get_user(user_id)
+        if not user or not user.get("golden_key"):
+            await update.message.reply_text(
+                "❌ *Бот не настроен!*\n\n"
+                "Сначала введите ваш golden_key:\n"
+                "`/setup ВАШ_ЗОЛОТОЙ_КЛЮЧ`\n\n"
+                "Инструкция: /help",
+                parse_mode="Markdown"
+            )
+            return
+        return await func(update, context)
+    return wrapper
 
+
+# ---------- Публичные команды ----------
 @admin_only
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_ref: CortexBot = context.bot_data["cortex"]
-    admin_id = bot_ref.config.get("Telegram", "admin_id")
-    if not admin_id:
-        bot_ref.config.set("Telegram", "admin_id", str(update.effective_user.id))
-    await update.message.reply_text(LOGO + "\nГлавное меню:", reply_markup=main_menu_kb())
+    user_id = update.effective_user.id
+    username = update.effective_user.username or ""
 
+    await bot_ref.db.create_user(user_id, username)
+    user = await bot_ref.db.get_user(user_id)
 
-@admin_only
-async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    bot_ref: CortexBot = context.bot_data["cortex"]
-    args = context.args or []
-
-    if len(args) < 1:
-        gk = bot_ref.config.get("FunPay", "golden_key")
-        gk_display = (gk[:8] + "…" + gk[-4:]) if len(gk) > 12 else (gk or "не задан")
+    if not user.get("golden_key"):
         text = (
-            "⚙️ *Настройка FunPay Cortex*\n\n"
-            f"Golden Key: `{gk_display}`\n\n"
-            "Использование:\n"
-            "`/setup golden_key ВАША_GOLDEN_KEY`\n"
-            "`/setup proxy http://user:pass@host:port`\n"
+            "🤖 *Добро пожаловать в FunPay Cortex!*\n\n"
+            "Этот бот автоматически отвечает на сообщения в вашем аккаунте *FunPay*.\n\n"
+            "🚀 *Что нужно сделать:*\n"
+            "1️⃣ *Получить golden_key*:\n"
+            "   • Зайдите на FunPay.com (браузер)\n"
+            "   • Нажмите F12 → Application → Cookies\n"
+            "   • Скопируйте значение `golden_key`\n\n"
+            "2️⃣ *Ввести ключ*:\n"
+            "   • Отправьте команду: `/setup ВАШ_КЛЮЧ`\n\n"
+            "3️⃣ *Пользоваться*:\n"
+            "   • Первые 7 дней — *бесплатно*\n"
+            "   • Затем — Premium: 75 Stars / 30 дней\n\n"
+            "📋 *Команды:* `/help`"
         )
         await update.message.reply_text(text, parse_mode="Markdown")
-        return
-
-    param = args[0].lower()
-    if param == "golden_key" and len(args) >= 2:
-        bot_ref.config.set("FunPay", "golden_key", args[1])
-        await update.message.reply_text("✅ Golden Key сохранён.")
-    elif param == "proxy" and len(args) >= 2:
-        bot_ref.config.set("FunPay", "proxy", args[1])
-        await update.message.reply_text("✅ Прокси сохранён.")
     else:
-        await update.message.reply_text("❌ Неизвестный параметр. См. /setup")
+        status = await bot_ref.subscription_manager.get_subscription_status(user_id)
+        days = status.get("days_left", 0)
+        tariff = status.get("tariff", "free").upper()
+        text = (
+            f"{LOGO}\n"
+            f"🔹 *Ваш статус:* `{tariff}`\n"
+            f"📅 Осталось дней: {days}\n"
+            f"🔑 Golden key: уже установлен\n"
+            f"👤 Профиль FunPay: {user.get('funpay_username') or 'не загружен'}\n\n"
+            f"📌 Используйте `/status` для деталей."
+        )
+        await update.message.reply_text(text, parse_mode="Markdown")
 
 
 @admin_only
-async def cmd_start_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_ref: CortexBot = context.bot_data["cortex"]
-    gk = bot_ref.config.get("FunPay", "golden_key")
-    if not gk:
-        await update.message.reply_text("❌ Сначала укажите Golden Key: `/setup golden_key ...`",
-                                        parse_mode="Markdown")
+    user_id = update.effective_user.id
+    args = context.args
+
+    if not args:
+        await update.message.reply_text("❌ Укажите golden_key: `/setup КЛЮЧ`", parse_mode="Markdown")
         return
 
-    msg = await update.message.reply_text("⏳ Запускаю модули…")
-
-    profile = await bot_ref.funpay.fetch_profile()
-    if not profile:
-        await msg.edit_text("❌ Не удалось подключиться к FunPay. Проверьте Golden Key.")
+    golden_key = args[0].strip()
+    if len(golden_key) < 10:
+        await update.message.reply_text("❌ Неверный формат ключа.")
         return
 
-    # Получаем баланс
-    balance_str = "0 ₽"
+    await update.message.reply_text("⏳ Проверяю golden_key...")
     try:
-        balance_obj = await bot_ref.funpay.account.get_balance()
-        balance_str = f"{balance_obj.available_rub:.2f} ₽"
+        test_api = FunPayAPI(golden_key)
+        profile = await test_api.fetch_profile()
+        if not profile or not profile.id:
+            await update.message.reply_text("❌ Golden_key недействителен. Проверьте и попробуйте снова.")
+            return
+        funpay_username = profile.username
+        funpay_id = profile.id
     except Exception as e:
-        logger.error(f"Ошибка получения баланса: {e}")
+        logger.error(f"Ошибка проверки ключа: {e}")
+        await update.message.reply_text("❌ Не удалось проверить ключ. Попробуйте позже.")
+        return
 
-    await bot_ref.auto_delivery.start()
-    await bot_ref.auto_bump.start()
-    await bot_ref.auto_responder.start()
-    await bot_ref.online_keeper.start()
-    bot_ref.is_running = True
+    await bot_ref.db.save_golden_key(user_id, golden_key, funpay_username, funpay_id)
+    sub_status = await bot_ref.subscription_manager.get_subscription_status(user_id)
+    if not sub_status["has_subscription"]:
+        await bot_ref.subscription_manager.activate_free_trial(user_id)
 
-    text = (
-        f"✅ *Бот запущен!*\n\n"
-        f"👤 Профиль: {profile.username}\n"
-        f"💰 Баланс: {balance_str}\n"
-        f"🆔 ID: {profile.id}\n\n"
-        f"📦 Автовыдача: {'✅' if bot_ref.auto_delivery.enabled else '❌'}\n"
-        f"📈 Автоподнятие: {'✅' if bot_ref.auto_bump.enabled else '❌'}\n"
-        f"💬 Автоответчик: {'✅' if bot_ref.auto_responder.enabled else '❌'}\n"
-        f"🟢 Вечный онлайн: {'✅' if bot_ref.online_keeper.enabled else '❌'}\n"
+    await update.message.reply_text(
+        f"✅ *Golden key принят!*\n\n"
+        f"🎉 Бесплатный период активирован на 7 дней.\n"
+        f"👤 Профиль: {funpay_username} (id: {funpay_id})\n"
+        f"💎 Чтобы продлить подписку: `/subscribe`",
+        parse_mode="Markdown"
     )
-    await msg.edit_text(text, parse_mode="Markdown")
 
 
 @admin_only
-async def cmd_stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_ref: CortexBot = context.bot_data["cortex"]
-    await bot_ref.auto_delivery.stop()
-    await bot_ref.auto_bump.stop()
-    await bot_ref.auto_responder.stop()
-    await bot_ref.online_keeper.stop()
-    bot_ref.is_running = False
-    await update.message.reply_text("⏹ Бот остановлен. Все модули выключены.")
+    user_id = update.effective_user.id
 
+    user = await bot_ref.db.get_user(user_id)
+    if not user or not user.get("golden_key"):
+        await update.message.reply_text("❌ Бот не настроен. Используйте /setup")
+        return
 
-@admin_only
-async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    bot_ref: CortexBot = context.bot_data["cortex"]
-    running = "🟢 Работает" if bot_ref.is_running else "🔴 Остановлен"
+    sub_status = await bot_ref.subscription_manager.get_subscription_status(user_id)
+    tariff = sub_status.get("tariff", "free")
+    days_left = sub_status.get("days_left", 0)
+    is_active = sub_status.get("has_subscription", False)
+
+    status_icon = "🟢" if is_active else "🔴"
+    tariff_display = tariff.upper() if is_active else "EXPIRED"
+
     products_count = await bot_ref.db.count_products()
+
     text = (
         f"📋 *Статус FunPay Cortex*\n\n"
-        f"Состояние: {running}\n\n"
-        f"📦 Автовыдача: {'✅ ON' if bot_ref.auto_delivery.enabled else '❌ OFF'}\n"
-        f"📈 Автоподнятие: {'✅ ON' if bot_ref.auto_bump.enabled else '❌ OFF'}"
-        f" (каждые {bot_ref.auto_bump.interval_hours}ч)\n"
-        f"💬 Автоответчик: {'✅ ON' if bot_ref.auto_responder.enabled else '❌ OFF'}\n"
-        f"🟢 Вечный онлайн: {'✅ ON' if bot_ref.online_keeper.enabled else '❌ OFF'}\n\n"
+        f"💎 *Подписка:* {status_icon} {tariff_display}\n"
+        f"📅 Осталось дней: {days_left}\n"
+        f"👤 Профиль: {user.get('funpay_username') or 'не загружен'}\n"
         f"📦 Товаров на выдачу: {products_count}\n"
-        f"⏱ Последнее поднятие: {bot_ref.auto_bump.last_bump}\n"
-        f"🔌 Плагинов: {len(bot_ref.plugin_manager.plugins)}\n"
+        f"🔌 Плагинов: {len(bot_ref.plugin_manager.plugins)}\n\n"
+        f"📌 /subscribe — оплатить Premium"
     )
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=back_kb())
 
 
 @admin_only
-async def cmd_stat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("📊 Выберите период:", reply_markup=stat_period_kb())
+async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bot_ref: CortexBot = context.bot_data["cortex"]
+    user_id = update.effective_user.id
+
+    user = await bot_ref.db.get_user(user_id)
+    if not user or not user.get("golden_key"):
+        await update.message.reply_text("❌ Сначала настройте бота: /setup")
+        return
+
+    await context.bot.send_invoice(
+        chat_id=user_id,
+        title="FunPay Cortex Premium",
+        description="Подписка на 30 дней. Все функции бота.",
+        payload="premium_30days",
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(label="Premium 30 дней", amount=75)],
+        start_parameter="premium_subscription"
+    )
 
 
 @admin_only
-async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = """
+🤖 *FunPay Cortex — автоответчик для FunPay*
+
+📌 *Первая настройка:*
+1. Получить golden_key на FunPay (F12 → Application → Cookies)
+2. Отправить: `/setup КЛЮЧ`
+
+💰 *Тарифы:*
+• Бесплатно: 7 дней (все функции)
+• Premium: 75 Stars / 30 дней
+
+📋 *Команды:*
+/start — приветствие
+/status — статус подписки
+/profile — профиль FunPay
+/subscribe — оплатить Premium
+/setup КЛЮЧ — ввести golden_key
+/checkchats — список чатов (для теста)
+
+🛠 *Админ-команды:*
+/start_bot, /stop_bot, /autodelivery, /autobump, /autoresponder, /interval, /add_product, /products, /plugins
+
+❓ *Помощь:* @ваш_username (указать свой)
+"""
+    await update.message.reply_text(help_text, parse_mode="Markdown")
+
+
+# ---------- Команды, требующие golden_key ----------
+@requires_golden_key
+@admin_only
+async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_ref: CortexBot = context.bot_data["cortex"]
-    profile = await bot_ref.funpay.fetch_profile()
+    user_id = update.effective_user.id
+    user = await bot_ref.db.get_user(user_id)
+    if not user or not user.get("golden_key"):
+        await update.message.reply_text("❌ Бот не настроен.")
+        return
+
+    api = FunPayAPI(user["golden_key"])
+    profile = await api.fetch_profile()
     if not profile:
-        await update.message.reply_text("❌ Не удалось загрузить профиль. Проверьте Golden Key.")
+        await update.message.reply_text("❌ Ошибка загрузки профиля. Проверьте golden_key.")
         return
-    lots = await bot_ref.funpay.fetch_lots()
-    
-    # Получаем баланс
-    balance_str = "0 ₽"
-    try:
-        balance_obj = await bot_ref.funpay.account.get_balance()
-        balance_str = f"{balance_obj.available_rub:.2f} ₽"
-    except:
-        pass
-    
-    text = (
-        f"👤 *Профиль FunPay*\n\n"
-        f"Имя: {profile.username}\n"
-        f"ID: {profile.id}\n"
-        f"Баланс: {balance_str}\n"
-        f"Активных лотов: {len(lots)}\n"
-    )
-    if lots[:5]:
-        text += "\n*Лоты:*\n"
-        for lot in lots[:10]:
-            text += f"• {lot.title} — {lot.price}\n"
-        if len(lots) > 10:
-            text += f"_…и ещё {len(lots) - 10}_\n"
-
+    lots = await api.fetch_lots()
+    text = f"👤 *Профиль FunPay*\nИмя: {profile.username}\nID: {profile.id}\nБаланс: {profile.balance}\nАктивных лотов: {len(lots)}"
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=back_kb())
 
 
+@requires_golden_key
 @admin_only
-async def cmd_autodelivery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_checkchats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_ref: CortexBot = context.bot_data["cortex"]
-    args = context.args or []
-    if not args:
-        status = "✅ ON" if bot_ref.auto_delivery.enabled else "❌ OFF"
-        await update.message.reply_text(
-            f"📦 Автовыдача: {status}\n\nИспользование: `/autodelivery on` или `/autodelivery off`",
-            parse_mode="Markdown",
-        )
+    user_id = update.effective_user.id
+    user = await bot_ref.db.get_user(user_id)
+    if not user or not user.get("golden_key"):
+        await update.message.reply_text("❌ Бот не настроен.")
         return
-
-    if args[0].lower() in ("on", "вкл", "1"):
-        bot_ref.auto_delivery.enable()
-        await update.message.reply_text("✅ Автовыдача включена.")
-    elif args[0].lower() in ("off", "выкл", "0"):
-        bot_ref.auto_delivery.disable()
-        await update.message.reply_text("❌ Автовыдача выключена.")
-
-
-@admin_only
-async def cmd_autobump(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    bot_ref: CortexBot = context.bot_data["cortex"]
-    args = context.args or []
-    if not args:
-        status = "✅ ON" if bot_ref.auto_bump.enabled else "❌ OFF"
-        await update.message.reply_text(
-            f"📈 Автоподнятие: {status} (каждые {bot_ref.auto_bump.interval_hours}ч)\n\n"
-            "Использование: `/autobump on` или `/autobump off`",
-            parse_mode="Markdown",
-        )
+    api = FunPayAPI(user["golden_key"])
+    await api.fetch_profile()
+    nodes = await api.fetch_chat_nodes()
+    if not nodes:
+        await update.message.reply_text("❌ Чаты не найдены.")
         return
-
-    if args[0].lower() in ("on", "вкл", "1"):
-        bot_ref.auto_bump.enable()
-        await update.message.reply_text("✅ Автоподнятие включено.")
-    elif args[0].lower() in ("off", "выкл", "0"):
-        bot_ref.auto_bump.disable()
-        await update.message.reply_text("❌ Автоподнятие выключено.")
+    text = f"✅ Найдено чатов: {len(nodes)}\n\n"
+    for node in nodes[:5]:
+        text += f"👤 {node['sender']}\n💬 {node['last_message'][:50]}\n📬 {'❗' if node['unread'] else '✅'}\n🆔 {node['node_id']}\n\n"
+    await update.message.reply_text(text)
 
 
+@requires_golden_key
 @admin_only
-async def cmd_autoresponder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    bot_ref: CortexBot = context.bot_data["cortex"]
-    args = context.args or []
-    if not args:
-        status = "✅ ON" if bot_ref.auto_responder.enabled else "❌ OFF"
-        await update.message.reply_text(
-            f"💬 Автоответчик: {status}\n\n"
-            "Использование: `/autoresponder on` или `/autoresponder off`",
-            parse_mode="Markdown",
-        )
-        return
-
-    if args[0].lower() in ("on", "вкл", "1"):
-        bot_ref.auto_responder.enable()
-        await update.message.reply_text("✅ Автоответчик включён.")
-    elif args[0].lower() in ("off", "выкл", "0"):
-        bot_ref.auto_responder.disable()
-        await update.message.reply_text("❌ Автоответчик выключен.")
-
-
-@admin_only
-async def cmd_interval(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    bot_ref: CortexBot = context.bot_data["cortex"]
-    args = context.args or []
-    if not args:
-        await update.message.reply_text(
-            f"⏱ Текущий интервал: {bot_ref.auto_bump.interval_hours}ч\n"
-            "Использование: `/interval 4`",
-            parse_mode="Markdown",
-        )
-        return
-    try:
-        hours = float(args[0])
-        if hours < 0.5:
-            await update.message.reply_text("❌ Минимальный интервал — 0.5 часа.")
-            return
-        bot_ref.auto_bump.set_interval(hours)
-        await update.message.reply_text(f"✅ Интервал установлен: {hours}ч")
-    except ValueError:
-        await update.message.reply_text("❌ Укажите число. Пример: `/interval 4`", parse_mode="Markdown")
-
-
-@admin_only
-async def cmd_plugins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    bot_ref: CortexBot = context.bot_data["cortex"]
-    plugins = bot_ref.plugin_manager.list_plugins()
-    if not plugins:
-        await update.message.reply_text("🔌 Плагины не найдены.\n\nПоложите `.py` файлы в папку `plugins/`.",
-                                        parse_mode="Markdown", reply_markup=back_kb())
-        return
-    text = "🔌 *Плагины:*\n\n"
-    for p in plugins:
-        text += f"{p}\n"
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=back_kb())
-
-
-@admin_only
-async def cmd_add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_add_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_ref: CortexBot = context.bot_data["cortex"]
     raw = update.message.text
     raw = raw.split(maxsplit=1)
     if len(raw) < 2 or "|" not in raw[1]:
-        await update.message.reply_text(
-            "📦 *Добавление товара для автовыдачи*\n\n"
-            "Формат: `/add_product Название лота | Содержимое товара`\n\n"
-            "Пример:\n"
-            "`/add_product Аккаунт Steam | login:password`",
-            parse_mode="Markdown",
-        )
+        await update.message.reply_text("Формат: `/add_product Название лота | Товар`", parse_mode="Markdown")
         return
-
     parts = raw[1].split("|", maxsplit=1)
     lot_name = parts[0].strip()
     content = parts[1].strip()
-
     pid = await bot_ref.db.add_product(lot_name, content)
     total = await bot_ref.db.count_products(lot_name)
-    await update.message.reply_text(
-        f"✅ Товар добавлен (#{pid})\n"
-        f"📦 Лот: {lot_name}\n"
-        f"📦 Всего товаров для этого лота: {total}"
-    )
+    await update.message.reply_text(f"✅ Товар добавлен (#{pid})\n📦 Лот: {lot_name}\n📦 Всего: {total}")
 
 
+@requires_golden_key
 @admin_only
-async def cmd_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_ref: CortexBot = context.bot_data["cortex"]
     lot_names = await bot_ref.db.get_all_lot_names()
     if not lot_names:
-        await update.message.reply_text("📦 Товаров для автовыдачи нет.\n\nДобавьте: `/add_product`",
-                                        parse_mode="Markdown")
+        await update.message.reply_text("📦 Товаров нет. Добавьте: /add_product")
         return
-
     text = "📦 *Товары для автовыдачи:*\n\n"
     total = 0
     for name in lot_names:
@@ -341,69 +305,132 @@ async def cmd_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=back_kb())
 
 
-# ═══════════════════════════════════════════════════════════════════
-# ТЕСТОВЫЕ КОМАНДЫ ДЛЯ ДИАГНОСТИКИ
-# ═══════════════════════════════════════════════════════════════════
-
+# ---------- Команды управления модулями (требуют golden_key) ----------
+@requires_golden_key
 @admin_only
-async def cmd_check_chats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    bot_ref: CortexBot = context.bot_data["cortex"]
-    await update.message.reply_text("🔍 Проверяю чаты FunPay...")
-    
-    nodes = await bot_ref.funpay.fetch_chat_nodes()
-    
-    if not nodes:
-        await update.message.reply_text("❌ Чаты не найдены.\n\nВозможные причины:\n• Нет активных диалогов\n• Golden key не даёт доступа к чатам\n• Ошибка парсинга")
-        return
-    
-    text = f"✅ Найдено чатов: {len(nodes)}\n\n"
-    for node in nodes[:5]:
-        text += f"📱 Собеседник: {node['sender'] or 'Без имени'}\n"
-        text += f"💬 Последнее сообщение: {node['last_message'][:50]}\n"
-        text += f"📬 Непрочитано: {'✅ ДА' if node['unread'] else '❌ НЕТ'}\n"
-        text += f"🆔 Node ID: {node['node_id']}\n\n"
-    
-    if len(nodes) > 5:
-        text += f"…и ещё {len(nodes)-5} чатов."
-    
-    await update.message.reply_text(text)
-
-
-@admin_only
-async def cmd_test_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Тестовая отправка сообщения: /testsend <node_id> <текст>"""
+async def cmd_autodelivery(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_ref: CortexBot = context.bot_data["cortex"]
     args = context.args
-    
-    if len(args) < 2:
-        await update.message.reply_text(
-            "📤 *Тест отправки сообщения*\n\n"
-            "Использование: `/testsend <node_id> <текст>`\n\n"
-            "Пример: `/testsend 265618373 Привет!`\n\n"
-            "Node ID можно получить через `/checkchats`",
-            parse_mode="Markdown"
-        )
+    if not args:
+        status = "✅ ON" if bot_ref.auto_delivery.enabled else "❌ OFF"
+        await update.message.reply_text(f"📦 Автовыдача: {status}\nИспользование: /autodelivery on/off")
         return
-    
-    node_id = args[0]
-    text = " ".join(args[1:])
-    
-    await update.message.reply_text(f"⏳ Отправляю сообщение в чат {node_id}...")
-    
-    result = await bot_ref.funpay.send_message(node_id, text)
-    
-    if result:
-        await update.message.reply_text(f"✅ Сообщение успешно отправлено в чат {node_id}")
+    if args[0].lower() == "on":
+        bot_ref.auto_delivery.enable()
+        await update.message.reply_text("✅ Автовыдача включена.")
     else:
-        await update.message.reply_text(f"❌ Не удалось отправить сообщение в чат {node_id}\n\nПроверьте логи.")
+        bot_ref.auto_delivery.disable()
+        await update.message.reply_text("❌ Автовыдача выключена.")
 
 
-# ═══════════════════════════════════════════════════════════════════
-# CALLBACK-ЗАПРОСЫ
-# ═══════════════════════════════════════════════════════════════════
+@requires_golden_key
+@admin_only
+async def cmd_autobump(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bot_ref: CortexBot = context.bot_data["cortex"]
+    args = context.args
+    if not args:
+        status = "✅ ON" if bot_ref.auto_bump.enabled else "❌ OFF"
+        await update.message.reply_text(f"📈 Автоподнятие: {status}\nИспользование: /autobump on/off")
+        return
+    if args[0].lower() == "on":
+        bot_ref.auto_bump.enable()
+        await update.message.reply_text("✅ Автоподнятие включено.")
+    else:
+        bot_ref.auto_bump.disable()
+        await update.message.reply_text("❌ Автоподнятие выключено.")
+
+
+@requires_golden_key
+@admin_only
+async def cmd_autoresponder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bot_ref: CortexBot = context.bot_data["cortex"]
+    args = context.args
+    if not args:
+        status = "✅ ON" if bot_ref.auto_responder.enabled else "❌ OFF"
+        await update.message.reply_text(f"💬 Автоответчик: {status}\nИспользование: /autoresponder on/off")
+        return
+    if args[0].lower() == "on":
+        bot_ref.auto_responder.enable()
+        await update.message.reply_text("✅ Автоответчик включён.")
+    else:
+        bot_ref.auto_responder.disable()
+        await update.message.reply_text("❌ Автоответчик выключен.")
+
+
+@requires_golden_key
+@admin_only
+async def cmd_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bot_ref: CortexBot = context.bot_data["cortex"]
+    args = context.args
+    if not args:
+        await update.message.reply_text(f"⏱ Текущий интервал: {bot_ref.auto_bump.interval_hours} ч")
+        return
+    try:
+        hours = float(args[0])
+        bot_ref.auto_bump.set_interval(hours)
+        await update.message.reply_text(f"✅ Интервал установлен: {hours} ч")
+    except:
+        await update.message.reply_text("❌ Укажите число.")
+
+
+# ---------- Прочие админские команды (не требуют ключа) ----------
+@admin_only
+async def cmd_start_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bot_ref: CortexBot = context.bot_data["cortex"]
+    gk = bot_ref.config.get("FunPay", "golden_key")
+    if not gk:
+        await update.message.reply_text("❌ Сначала укажите Golden Key: `/setup golden_key ...`", parse_mode="Markdown")
+        return
+    msg = await update.message.reply_text("⏳ Запускаю модули…")
+    profile = await bot_ref.funpay.fetch_profile()
+    if not profile:
+        await msg.edit_text("❌ Не удалось подключиться к FunPay. Проверьте Golden Key.")
+        return
+    await bot_ref.auto_delivery.start()
+    await bot_ref.auto_bump.start()
+    await bot_ref.auto_responder.start()
+    await bot_ref.online_keeper.start()
+    bot_ref.is_running = True
+    balance_str = "0 ₽"
+    try:
+        balance_obj = await bot_ref.funpay.account.get_balance()
+        balance_str = f"{balance_obj.available_rub:.2f} ₽"
+    except:
+        pass
+    text = f"✅ *Бот запущен!*\n👤 {profile.username}\n💰 {balance_str}\n📦 Автовыдача: {'✅' if bot_ref.auto_delivery.enabled else '❌'}\n📈 Автоподнятие: {'✅' if bot_ref.auto_bump.enabled else '❌'}\n💬 Автоответчик: {'✅' if bot_ref.auto_responder.enabled else '❌'}\n🟢 Вечный онлайн: {'✅' if bot_ref.online_keeper.enabled else '❌'}"
+    await msg.edit_text(text, parse_mode="Markdown")
+
 
 @admin_only
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bot_ref: CortexBot = context.bot_data["cortex"]
+    await bot_ref.auto_delivery.stop()
+    await bot_ref.auto_bump.stop()
+    await bot_ref.auto_responder.stop()
+    await bot_ref.online_keeper.stop()
+    bot_ref.is_running = False
+    await update.message.reply_text("⏹ Бот остановлен. Все модули выключены.")
+
+
+@admin_only
+async def cmd_stat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📊 Выберите период:", reply_markup=stat_period_kb())
+
+
+@admin_only
+async def cmd_plugins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bot_ref: CortexBot = context.bot_data["cortex"]
+    plugins = bot_ref.plugin_manager.list_plugins()
+    if not plugins:
+        await update.message.reply_text("🔌 Плагины не найдены.", reply_markup=back_kb())
+        return
+    text = "🔌 *Плагины:*\n\n" + "\n".join(str(p) for p in plugins)
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=back_kb())
+
+
+# ---------- Callback-запросы ----------
+@admin_only
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -415,32 +442,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     elif data == "cmd_start_bot":
         gk = bot_ref.config.get("FunPay", "golden_key")
         if not gk:
-            await query.edit_message_text("❌ Golden Key не задан. Используйте /setup",
-                                          reply_markup=back_kb())
+            await query.edit_message_text("❌ Golden Key не задан.", reply_markup=back_kb())
             return
         await query.edit_message_text("⏳ Запускаю…")
         profile = await bot_ref.funpay.fetch_profile()
         if not profile:
             await query.edit_message_text("❌ Ошибка подключения к FunPay.", reply_markup=back_kb())
             return
-        
-        # Получаем баланс
-        balance_str = "0 ₽"
-        try:
-            balance_obj = await bot_ref.funpay.account.get_balance()
-            balance_str = f"{balance_obj.available_rub:.2f} ₽"
-        except:
-            pass
-        
         await bot_ref.auto_delivery.start()
         await bot_ref.auto_bump.start()
         await bot_ref.auto_responder.start()
         await bot_ref.online_keeper.start()
         bot_ref.is_running = True
-        await query.edit_message_text(
-            f"✅ Запущено!\n👤 {profile.username}\n💰 {balance_str}",
-            reply_markup=back_kb(),
-        )
+        await query.edit_message_text(f"✅ Запущено!\n👤 {profile.username}", reply_markup=back_kb())
 
     elif data == "cmd_stop_bot":
         await bot_ref.auto_delivery.stop()
@@ -459,9 +473,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             f"📈 Автоподнятие: {'✅' if bot_ref.auto_bump.enabled else '❌'}\n"
             f"💬 Автоответчик: {'✅' if bot_ref.auto_responder.enabled else '❌'}\n"
             f"🟢 Онлайн: {'✅' if bot_ref.online_keeper.enabled else '❌'}\n"
-            f"📦 Товаров: {pc}\n"
-            f"⏱ Посл. поднятие: {bot_ref.auto_bump.last_bump}",
-            reply_markup=back_kb(),
+            f"📦 Товаров: {pc}",
+            reply_markup=back_kb()
         )
 
     elif data == "cmd_stat":
@@ -475,25 +488,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             f"📊 *Статистика за {period_labels.get(period, period)}*\n\n"
             f"📦 Заказов: {stats['orders']}\n"
             f"✅ Выдано: {stats['delivered']}\n"
-            f"💰 Оборот: {stats['revenue']:.2f} ₽\n",
+            f"💰 Оборот: {stats['revenue']:.2f} ₽",
             parse_mode="Markdown",
-            reply_markup=back_kb(),
+            reply_markup=back_kb()
         )
 
     elif data == "cmd_profile":
         profile = await bot_ref.funpay.fetch_profile()
         if profile:
-            # Получаем баланс
-            balance_str = "0 ₽"
-            try:
-                balance_obj = await bot_ref.funpay.account.get_balance()
-                balance_str = f"{balance_obj.available_rub:.2f} ₽"
-            except:
-                pass
-            await query.edit_message_text(
-                f"👤 {profile.username}\n🆔 {profile.id}\n💰 {balance_str}",
-                reply_markup=back_kb(),
-            )
+            await query.edit_message_text(f"👤 {profile.username}\n🆔 {profile.id}\n💰 {profile.balance}", reply_markup=back_kb())
         else:
             await query.edit_message_text("❌ Ошибка загрузки профиля.", reply_markup=back_kb())
 
@@ -535,8 +538,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     elif data == "change_interval":
         await query.edit_message_text(
-            f"⏱ Текущий интервал: {bot_ref.auto_bump.interval_hours}ч\n\n"
-            "Отправьте команду: `/interval <часы>`",
+            f"⏱ Текущий интервал: {bot_ref.auto_bump.interval_hours} ч\n\nОтправьте команду: `/interval <часы>`",
             parse_mode="Markdown",
-            reply_markup=back_kb(),
+            reply_markup=back_kb()
         )

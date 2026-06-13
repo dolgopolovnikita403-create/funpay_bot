@@ -417,42 +417,19 @@ async def cmd_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=back_kb())
 
 
-# ---------- CALLBACK-ЗАПРОСЫ (некоторые требуют админа) ----------
+# ---------- CALLBACK-ЗАПРОСЫ (с разделением прав) ----------
 
-@admin_only
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
     bot_ref: CortexBot = context.bot_data["cortex"]
+    user_id = update.effective_user.id
+    is_admin_user = is_admin(bot_ref, user_id)
 
+    # Публичные callback'ы (доступны всем)
     if data == "cmd_menu":
         await query.edit_message_text(LOGO + "\nГлавное меню:", reply_markup=main_menu_kb())
-
-    elif data == "cmd_start_bot":
-        gk = bot_ref.config.get("FunPay", "golden_key")
-        if not gk:
-            await query.edit_message_text("❌ Golden Key не задан.", reply_markup=back_kb())
-            return
-        await query.edit_message_text("⏳ Запускаю…")
-        profile = await bot_ref.funpay.fetch_profile()
-        if not profile:
-            await query.edit_message_text("❌ Ошибка подключения к FunPay.", reply_markup=back_kb())
-            return
-        await bot_ref.auto_delivery.start()
-        await bot_ref.auto_bump.start()
-        await bot_ref.auto_responder.start()
-        await bot_ref.online_keeper.start()
-        bot_ref.is_running = True
-        await query.edit_message_text(f"✅ Запущено!\n👤 {profile.username}", reply_markup=back_kb())
-
-    elif data == "cmd_stop_bot":
-        await bot_ref.auto_delivery.stop()
-        await bot_ref.auto_bump.stop()
-        await bot_ref.auto_responder.stop()
-        await bot_ref.online_keeper.stop()
-        bot_ref.is_running = False
-        await query.edit_message_text("⏹ Остановлено.", reply_markup=back_kb())
 
     elif data == "cmd_status":
         running = "🟢" if bot_ref.is_running else "🔴"
@@ -495,6 +472,35 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "🔌 Плагины:\n\n" + ("\n".join(str(p) for p in plugins) if plugins else "Нет плагинов.")
         await query.edit_message_text(text, reply_markup=back_kb())
 
+    # Админские callback'ы (только для админа)
+    elif not is_admin_user:
+        await query.edit_message_text("⛔ Доступ запрещён.", reply_markup=back_kb())
+
+    elif data == "cmd_start_bot":
+        gk = bot_ref.config.get("FunPay", "golden_key")
+        if not gk:
+            await query.edit_message_text("❌ Golden Key не задан.", reply_markup=back_kb())
+            return
+        await query.edit_message_text("⏳ Запускаю…")
+        profile = await bot_ref.funpay.fetch_profile()
+        if not profile:
+            await query.edit_message_text("❌ Ошибка подключения к FunPay.", reply_markup=back_kb())
+            return
+        await bot_ref.auto_delivery.start()
+        await bot_ref.auto_bump.start()
+        await bot_ref.auto_responder.start()
+        await bot_ref.online_keeper.start()
+        bot_ref.is_running = True
+        await query.edit_message_text(f"✅ Запущено!\n👤 {profile.username}", reply_markup=back_kb())
+
+    elif data == "cmd_stop_bot":
+        await bot_ref.auto_delivery.stop()
+        await bot_ref.auto_bump.stop()
+        await bot_ref.auto_responder.stop()
+        await bot_ref.online_keeper.stop()
+        bot_ref.is_running = False
+        await query.edit_message_text("⏹ Остановлено.", reply_markup=back_kb())
+
     elif data == "cmd_settings":
         await query.edit_message_text("⚙️ Настройки:", reply_markup=settings_kb(bot_ref.config))
 
@@ -532,3 +538,5 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
             reply_markup=back_kb()
         )
+    else:
+        await query.edit_message_text("❌ Неизвестная команда.", reply_markup=back_kb())

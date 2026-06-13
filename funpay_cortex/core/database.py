@@ -1,4 +1,4 @@
-"""SQLite-хранилище с поддержкой пользователей, подписок, товаров и заказов (многопользовательское)."""
+"""SQLite-хранилище с автоматической миграцией."""
 from __future__ import annotations
 
 import sqlite3
@@ -10,18 +10,16 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("Database")
-
 executor = ThreadPoolExecutor(max_workers=1)
-
 
 def run_sync(func, *args, **kwargs):
     return asyncio.get_event_loop().run_in_executor(executor, lambda: func(*args, **kwargs))
-
 
 class Database:
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
         self._init_db()
+        self._migrate()
 
     def _init_db(self) -> None:
         with sqlite3.connect(self.path) as conn:
@@ -88,8 +86,36 @@ class Database:
             """)
         logger.info("БД инициализирована: %s", self.path)
 
+    def _migrate(self) -> None:
+        """Добавляет недостающие колонки в существующие таблицы."""
+        with sqlite3.connect(self.path) as conn:
+            # products
+            cur = conn.execute("PRAGMA table_info(products)")
+            cols = [row[1] for row in cur.fetchall()]
+            if "telegram_id" not in cols:
+                conn.execute("ALTER TABLE products ADD COLUMN telegram_id INTEGER")
+                logger.info("Миграция: products.telegram_id добавлен")
+            # orders
+            cur = conn.execute("PRAGMA table_info(orders)")
+            cols = [row[1] for row in cur.fetchall()]
+            if "telegram_id" not in cols:
+                conn.execute("ALTER TABLE orders ADD COLUMN telegram_id INTEGER")
+                logger.info("Миграция: orders.telegram_id добавлен")
+            # bot_users
+            cur = conn.execute("PRAGMA table_info(bot_users)")
+            cols = [row[1] for row in cur.fetchall()]
+            for col in ["auto_delivery", "auto_bump", "auto_responder", "online_keeper", "bump_interval"]:
+                if col not in cols:
+                    if col == "bump_interval":
+                        conn.execute(f"ALTER TABLE bot_users ADD COLUMN {col} REAL DEFAULT 4.0")
+                    else:
+                        conn.execute(f"ALTER TABLE bot_users ADD COLUMN {col} INTEGER DEFAULT 0")
+                    logger.info(f"Миграция: bot_users.{col} добавлен")
+            conn.commit()
+
     async def initialize(self) -> None:
         await run_sync(self._init_db)
+        await run_sync(self._migrate)
 
     async def execute(self, query: str, params: tuple = ()) -> None:
         def _execute():
@@ -151,74 +177,46 @@ class Database:
             return False
 
     async def get_all_active_users(self) -> list[dict]:
-        """Возвращает всех пользователей с активной подпиской и golden_key."""
         return await self.fetch_all(
             "SELECT * FROM bot_users WHERE subscription_end > datetime('now') AND golden_key IS NOT NULL AND golden_key != ''"
         )
 
     # ------------------ МОДУЛИ ПОЛЬЗОВАТЕЛЕЙ ------------------
     async def get_module_state(self, telegram_id: int, module_name: str) -> bool:
-        """Возвращает состояние модуля (включён/выключен) для пользователя."""
-        row = await self.fetch_one(
-            f"SELECT {module_name} FROM bot_users WHERE telegram_id = ?",
-            (telegram_id,)
-        )
-        if not row:
-            return False
-        return bool(row.get(module_name, 0))
+        row = await self.fetch_one(f"SELECT {module_name} FROM bot_users WHERE telegram_id = ?", (telegram_id,))
+        return bool(row.get(module_name, 0)) if row else False
 
     async def set_module_state(self, telegram_id: int, module_name: str, state: bool) -> None:
-        """Устанавливает состояние модуля для пользователя."""
-        await self.execute(
-            f"UPDATE bot_users SET {module_name} = ? WHERE telegram_id = ?",
-            (1 if state else 0, telegram_id)
-        )
+        await self.execute(f"UPDATE bot_users SET {module_name} = ? WHERE telegram_id = ?", (1 if state else 0, telegram_id))
 
     async def get_user_bump_interval(self, telegram_id: int) -> float:
-        """Возвращает интервал поднятия лотов для пользователя."""
-        row = await self.fetch_one(
-            "SELECT bump_interval FROM bot_users WHERE telegram_id = ?",
-            (telegram_id,)
-        )
+        row = await self.fetch_one("SELECT bump_interval FROM bot_users WHERE telegram_id = ?", (telegram_id,))
         if not row or row.get("bump_interval") is None:
             return 4.0
         return float(row["bump_interval"])
 
     async def set_user_bump_interval(self, telegram_id: int, interval: float) -> None:
-        """Устанавливает интервал поднятия лотов для пользователя."""
-        await self.execute(
-            "UPDATE bot_users SET bump_interval = ? WHERE telegram_id = ?",
-            (interval, telegram_id)
-        )
+        await self.execute("UPDATE bot_users SET bump_interval = ? WHERE telegram_id = ?", (interval, telegram_id))
 
     # ------------------ ЗАКАЗЫ ------------------
-    async def add_order(
-        self, order_id: str, buyer: str, lot_name: str = "",
-        amount: float = 0, currency: str = "RUB", status: str = "new",
-        telegram_id: int = 0
-    ) -> bool:
+    async def add_order(self, order_id: str, buyer: str, lot_name: str = "", amount: float = 0, currency: str = "RUB", status: str = "new", telegram_id: int = 0) -> bool:
         try:
             await self.execute(
-                "INSERT OR IGNORE INTO orders (order_id, buyer, lot_name, amount, currency, status, telegram_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (order_id, buyer, lot_name, amount, currency, status, telegram_id),
+                "INSERT OR IGNORE INTO orders (order_id, buyer, lot_name, amount, currency, status, telegram_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (order_id, buyer, lot_name, amount, currency, status, telegram_id)
             )
             return True
         except Exception as e:
-            logger.error("add_order error: %s", e)
+            logger.error(f"add_order error: {e}")
             return False
 
     async def is_order_known(self, order_id: str, telegram_id: int) -> bool:
-        row = await self.fetch_one(
-            "SELECT 1 FROM orders WHERE order_id = ? AND telegram_id = ?",
-            (order_id, telegram_id)
-        )
+        row = await self.fetch_one("SELECT 1 FROM orders WHERE order_id = ? AND telegram_id = ?", (order_id, telegram_id))
         return row is not None
 
     async def mark_delivered(self, order_id: str, telegram_id: int) -> None:
         await self.execute(
-            "UPDATE orders SET delivered = 1, delivered_at = datetime('now'), status = 'delivered' "
-            "WHERE order_id = ? AND telegram_id = ?",
+            "UPDATE orders SET delivered = 1, delivered_at = datetime('now'), status = 'delivered' WHERE order_id = ? AND telegram_id = ?",
             (order_id, telegram_id)
         )
 
@@ -234,7 +232,7 @@ class Database:
     async def get_product(self, lot_name: str, telegram_id: int) -> str | None:
         row = await self.fetch_one(
             "SELECT id, content FROM products WHERE lot_name = ? AND used = 0 AND telegram_id = ? ORDER BY id ASC LIMIT 1",
-            (lot_name, telegram_id),
+            (lot_name, telegram_id)
         )
         if not row:
             return None
@@ -263,9 +261,6 @@ class Database:
 
     # ------------------ СТАТИСТИКА ------------------
     async def get_stats(self, period: str = "all", telegram_id: int = 0) -> dict[str, Any]:
-        """
-        Возвращает статистику по заказам. Если telegram_id == 0 — по всем, иначе по конкретному пользователю.
-        """
         now = datetime.utcnow()
         if period == "day":
             since = (now - timedelta(days=1)).isoformat()
@@ -277,23 +272,11 @@ class Database:
             since = "2000-01-01T00:00:00"
 
         if telegram_id == 0:
-            row = await self.fetch_one(
-                "SELECT COUNT(*) as cnt, COALESCE(SUM(amount), 0) as total FROM orders WHERE created_at >= ?",
-                (since,)
-            )
-            d_row = await self.fetch_one(
-                "SELECT COUNT(*) as cnt FROM orders WHERE delivered = 1 AND created_at >= ?",
-                (since,)
-            )
+            row = await self.fetch_one("SELECT COUNT(*) as cnt, COALESCE(SUM(amount), 0) as total FROM orders WHERE created_at >= ?", (since,))
+            d_row = await self.fetch_one("SELECT COUNT(*) as cnt FROM orders WHERE delivered = 1 AND created_at >= ?", (since,))
         else:
-            row = await self.fetch_one(
-                "SELECT COUNT(*) as cnt, COALESCE(SUM(amount), 0) as total FROM orders WHERE created_at >= ? AND telegram_id = ?",
-                (since, telegram_id)
-            )
-            d_row = await self.fetch_one(
-                "SELECT COUNT(*) as cnt FROM orders WHERE delivered = 1 AND created_at >= ? AND telegram_id = ?",
-                (since, telegram_id)
-            )
+            row = await self.fetch_one("SELECT COUNT(*) as cnt, COALESCE(SUM(amount), 0) as total FROM orders WHERE created_at >= ? AND telegram_id = ?", (since, telegram_id))
+            d_row = await self.fetch_one("SELECT COUNT(*) as cnt FROM orders WHERE delivered = 1 AND created_at >= ? AND telegram_id = ?", (since, telegram_id))
         return {
             "period": period,
             "orders": row["cnt"] if row else 0,

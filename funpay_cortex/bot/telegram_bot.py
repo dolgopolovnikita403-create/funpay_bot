@@ -1,4 +1,4 @@
-"""Главный модуль Telegram-бота — собирает всё воедино."""
+"""Главный модуль Telegram-бота."""
 from __future__ import annotations
 
 import logging
@@ -39,11 +39,7 @@ if TYPE_CHECKING:
     from core.config_manager import ConfigManager
     from core.database import Database
     from core.funpay_api import FunPayAPI
-    from core.auto_delivery import AutoDelivery
-    from core.auto_bump import AutoBump
-    from core.auto_responder import AutoResponder
-    from core.online_keeper import OnlineKeeper
-    from core.plugin_manager import PluginManager
+    from core.user_module_manager import UserModuleManager
 
 logger = logging.getLogger("CortexBot")
 
@@ -53,47 +49,15 @@ class CortexBot:
         self,
         config: ConfigManager,
         db: Database,
-        funpay: FunPayAPI,
-        auto_delivery: AutoDelivery,
-        auto_bump: AutoBump,
-        auto_responder: AutoResponder,
-        online_keeper: OnlineKeeper,
-        plugin_manager: PluginManager,
+        funpay_admin: FunPayAPI,
+        user_module_manager: UserModuleManager,
     ) -> None:
         self.config = config
         self.db = db
-        self.funpay = funpay
-        self.auto_delivery = auto_delivery
-        self.auto_bump = auto_bump
-        self.auto_responder = auto_responder
-        self.online_keeper = online_keeper
-        self.plugin_manager = plugin_manager
+        self.funpay_admin = funpay_admin  # используется только для команд админа (статистика, глобальное)
+        self.user_module_manager = user_module_manager
         self.subscription_manager = SubscriptionManager(db)
-        self.is_running = False
         self._app: Application | None = None
-
-        self.auto_delivery.on_delivery(self._on_delivery)
-        self.auto_bump.on_bump(self._on_bump)
-
-    async def _on_delivery(self, order_id, buyer, lot_name, product):
-        admin_id = self.config.get("Telegram", "admin_id")
-        if not admin_id or not self._app:
-            return
-        if product:
-            text = f"✅ *Товар выдан!*\nЗаказ: {order_id}\nПокупатель: {buyer}\nЛот: {lot_name}\nТовар: {product[:100]}"
-        else:
-            text = f"⚠️ *Нет товаров для лота* {lot_name}\nЗаказ: {order_id}\nПокупатель: {buyer}"
-        try:
-            await self._app.bot.send_message(chat_id=int(admin_id), text=text, parse_mode="Markdown")
-        except Exception as e:
-            logger.error(f"Ошибка отправки уведомления: {e}")
-
-    async def _on_bump(self, success: bool, message: str):
-        admin_id = self.config.get("Telegram", "admin_id")
-        if not admin_id or not self._app:
-            return
-        emoji = "✅" if success else "❌"
-        await self._app.bot.send_message(chat_id=int(admin_id), text=f"{emoji} Автоподнятие: {message}")
 
     async def run(self):
         token = self.config.get("Telegram", "bot_token")
@@ -123,7 +87,7 @@ class CortexBot:
         self._app.add_handler(CommandHandler("subscribe", cmd_subscribe))
         self._app.add_handler(CommandHandler("help", cmd_help))
 
-        # Обработчики платежей
+        # Платежи
         self._app.add_handler(PreCheckoutQueryHandler(self.pre_checkout_query))
         self._app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, self.successful_payment))
 
@@ -153,11 +117,7 @@ class CortexBot:
 
     async def _shutdown(self):
         logger.info("Завершение работы…")
-        await self.auto_delivery.stop()
-        await self.auto_bump.stop()
-        await self.auto_responder.stop()
-        await self.online_keeper.stop()
-        await self.funpay.close()
+        await self.user_module_manager.stop_all()
         await self.db.close()
         if self._app:
             await self._app.updater.stop()

@@ -191,10 +191,13 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Ошибка загрузки профиля. Проверьте golden_key.")
         return
     lots = await api.fetch_lots()
-    # Получаем баланс через get_balance()
+    # Получаем баланс через get_balance() – если не получается, пишем "ошибка"
     try:
         balance_obj = await api.account.get_balance()
-        balance_str = f"{balance_obj.available_rub:.2f} ₽"
+        if balance_obj:
+            balance_str = f"{balance_obj.available_rub:.2f} ₽"
+        else:
+            balance_str = "не удалось получить"
     except Exception as e:
         logger.error(f"Ошибка получения баланса: {e}")
         balance_str = "не удалось получить"

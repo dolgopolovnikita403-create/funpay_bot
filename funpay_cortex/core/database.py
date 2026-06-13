@@ -1,4 +1,4 @@
-"""SQLite-хранилище с поддержкой пользователей, подписок, товаров и модулей."""
+"""SQLite-хранилище с поддержкой пользователей, подписок, товаров и заказов (многопользовательское)."""
 from __future__ import annotations
 
 import sqlite3
@@ -27,25 +27,8 @@ class Database:
         with sqlite3.connect(self.path) as conn:
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.executescript("""
-                CREATE TABLE IF NOT EXISTS bot_users (
-                    telegram_id       INTEGER PRIMARY KEY,
-                    username         TEXT,
-                    golden_key       TEXT,
-                    funpay_username  TEXT,
-                    funpay_id        INTEGER,
-                    tariff           TEXT DEFAULT 'free',
-                    subscription_end  TEXT,
-                    auto_delivery     INTEGER DEFAULT 0,
-                    auto_bump         INTEGER DEFAULT 0,
-                    auto_responder    INTEGER DEFAULT 0,
-                    online_keeper     INTEGER DEFAULT 0,
-                    bump_interval     REAL DEFAULT 4.0,
-                    created_at       TEXT DEFAULT (datetime('now'))
-                );
-
                 CREATE TABLE IF NOT EXISTS orders (
                     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                    telegram_id   INTEGER,
                     order_id      TEXT    NOT NULL,
                     buyer         TEXT    NOT NULL,
                     lot_name      TEXT    NOT NULL DEFAULT '',
@@ -54,26 +37,43 @@ class Database:
                     status        TEXT    NOT NULL DEFAULT 'new',
                     delivered     INTEGER NOT NULL DEFAULT 0,
                     delivered_at  TEXT,
-                    created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+                    telegram_id   INTEGER NOT NULL,
+                    created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(order_id, telegram_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS products (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    telegram_id INTEGER,
                     lot_name    TEXT    NOT NULL,
                     content     TEXT    NOT NULL,
                     used        INTEGER NOT NULL DEFAULT 0,
+                    telegram_id INTEGER NOT NULL,
                     created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
                 );
 
                 CREATE TABLE IF NOT EXISTS messages_log (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    telegram_id INTEGER,
                     node_id     TEXT,
                     sender      TEXT,
                     text        TEXT,
                     replied     INTEGER NOT NULL DEFAULT 0,
                     created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS bot_users (
+                    telegram_id       INTEGER PRIMARY KEY,
+                    username         TEXT,
+                    golden_key       TEXT,
+                    funpay_username  TEXT,
+                    funpay_id        INTEGER,
+                    tariff           TEXT DEFAULT 'free',
+                    subscription_end  TEXT,
+                    auto_delivery    INTEGER DEFAULT 0,
+                    auto_bump        INTEGER DEFAULT 0,
+                    auto_responder   INTEGER DEFAULT 0,
+                    online_keeper    INTEGER DEFAULT 0,
+                    bump_interval    REAL DEFAULT 4.0,
+                    created_at       TEXT DEFAULT (datetime('now'))
                 );
 
                 CREATE TABLE IF NOT EXISTS payments (
@@ -115,7 +115,7 @@ class Database:
                 return [dict(row) for row in cur.fetchall()]
         return await run_sync(_fetch_all)
 
-    # ------------------ ПОЛЬЗОВАТЕЛИ ------------------
+    # ------------------ ПОЛЬЗОВАТЕЛИ И ПОДПИСКИ ------------------
     async def get_user(self, telegram_id: int) -> dict | None:
         return await self.fetch_one("SELECT * FROM bot_users WHERE telegram_id = ?", (telegram_id,))
 
@@ -151,46 +151,90 @@ class Database:
             return False
 
     async def get_all_active_users(self) -> list[dict]:
-        return await self.fetch_all("SELECT * FROM bot_users WHERE subscription_end > datetime('now')")
-
-    # ------------------ СОСТОЯНИЕ МОДУЛЕЙ ------------------
-    async def get_module_state(self, telegram_id: int, module: str) -> bool:
-        user = await self.get_user(telegram_id)
-        if not user:
-            return False
-        return bool(user.get(module, 0))
-
-    async def set_module_state(self, telegram_id: int, module: str, enabled: bool) -> None:
-        await self.execute(
-            f"UPDATE bot_users SET {module} = ? WHERE telegram_id = ?",
-            (1 if enabled else 0, telegram_id)
+        """Возвращает всех пользователей с активной подпиской и golden_key."""
+        return await self.fetch_all(
+            "SELECT * FROM bot_users WHERE subscription_end > datetime('now') AND golden_key IS NOT NULL AND golden_key != ''"
         )
 
-    async def get_bump_interval(self, telegram_id: int) -> float:
-        user = await self.get_user(telegram_id)
-        if not user:
-            return 4.0
-        return float(user.get("bump_interval", 4.0))
+    # ------------------ МОДУЛИ ПОЛЬЗОВАТЕЛЕЙ ------------------
+    async def get_module_state(self, telegram_id: int, module_name: str) -> bool:
+        """Возвращает состояние модуля (включён/выключен) для пользователя."""
+        row = await self.fetch_one(
+            f"SELECT {module_name} FROM bot_users WHERE telegram_id = ?",
+            (telegram_id,)
+        )
+        if not row:
+            return False
+        return bool(row.get(module_name, 0))
 
-    async def set_bump_interval(self, telegram_id: int, hours: float) -> None:
+    async def set_module_state(self, telegram_id: int, module_name: str, state: bool) -> None:
+        """Устанавливает состояние модуля для пользователя."""
+        await self.execute(
+            f"UPDATE bot_users SET {module_name} = ? WHERE telegram_id = ?",
+            (1 if state else 0, telegram_id)
+        )
+
+    async def get_user_bump_interval(self, telegram_id: int) -> float:
+        """Возвращает интервал поднятия лотов для пользователя."""
+        row = await self.fetch_one(
+            "SELECT bump_interval FROM bot_users WHERE telegram_id = ?",
+            (telegram_id,)
+        )
+        if not row or row.get("bump_interval") is None:
+            return 4.0
+        return float(row["bump_interval"])
+
+    async def set_user_bump_interval(self, telegram_id: int, interval: float) -> None:
+        """Устанавливает интервал поднятия лотов для пользователя."""
         await self.execute(
             "UPDATE bot_users SET bump_interval = ? WHERE telegram_id = ?",
-            (hours, telegram_id)
+            (interval, telegram_id)
         )
 
-    # ------------------ ТОВАРЫ (привязаны к пользователю) ------------------
-    async def add_product(self, telegram_id: int, lot_name: str, content: str) -> int:
+    # ------------------ ЗАКАЗЫ ------------------
+    async def add_order(
+        self, order_id: str, buyer: str, lot_name: str = "",
+        amount: float = 0, currency: str = "RUB", status: str = "new",
+        telegram_id: int = 0
+    ) -> bool:
+        try:
+            await self.execute(
+                "INSERT OR IGNORE INTO orders (order_id, buyer, lot_name, amount, currency, status, telegram_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (order_id, buyer, lot_name, amount, currency, status, telegram_id),
+            )
+            return True
+        except Exception as e:
+            logger.error("add_order error: %s", e)
+            return False
+
+    async def is_order_known(self, order_id: str, telegram_id: int) -> bool:
+        row = await self.fetch_one(
+            "SELECT 1 FROM orders WHERE order_id = ? AND telegram_id = ?",
+            (order_id, telegram_id)
+        )
+        return row is not None
+
+    async def mark_delivered(self, order_id: str, telegram_id: int) -> None:
         await self.execute(
-            "INSERT INTO products (telegram_id, lot_name, content) VALUES (?, ?, ?)",
-            (telegram_id, lot_name, content)
+            "UPDATE orders SET delivered = 1, delivered_at = datetime('now'), status = 'delivered' "
+            "WHERE order_id = ? AND telegram_id = ?",
+            (order_id, telegram_id)
+        )
+
+    # ------------------ ТОВАРЫ ------------------
+    async def add_product(self, lot_name: str, content: str, telegram_id: int) -> int:
+        await self.execute(
+            "INSERT INTO products (lot_name, content, telegram_id) VALUES (?, ?, ?)",
+            (lot_name, content, telegram_id)
         )
         row = await self.fetch_one("SELECT last_insert_rowid() as id")
         return row["id"] if row else 0
 
-    async def get_product(self, telegram_id: int, lot_name: str) -> str | None:
+    async def get_product(self, lot_name: str, telegram_id: int) -> str | None:
         row = await self.fetch_one(
-            "SELECT id, content FROM products WHERE telegram_id = ? AND lot_name = ? AND used = 0 ORDER BY id ASC LIMIT 1",
-            (telegram_id, lot_name)
+            "SELECT id, content FROM products WHERE lot_name = ? AND used = 0 AND telegram_id = ? ORDER BY id ASC LIMIT 1",
+            (lot_name, telegram_id),
         )
         if not row:
             return None
@@ -200,49 +244,28 @@ class Database:
     async def count_products(self, telegram_id: int, lot_name: str | None = None) -> int:
         if lot_name:
             row = await self.fetch_one(
-                "SELECT COUNT(*) as cnt FROM products WHERE telegram_id = ? AND lot_name = ? AND used = 0",
-                (telegram_id, lot_name)
+                "SELECT COUNT(*) as cnt FROM products WHERE lot_name = ? AND used = 0 AND telegram_id = ?",
+                (lot_name, telegram_id)
             )
         else:
             row = await self.fetch_one(
-                "SELECT COUNT(*) as cnt FROM products WHERE telegram_id = ? AND used = 0",
+                "SELECT COUNT(*) as cnt FROM products WHERE used = 0 AND telegram_id = ?",
                 (telegram_id,)
             )
         return row["cnt"] if row else 0
 
     async def get_all_lot_names(self, telegram_id: int) -> list[str]:
         rows = await self.fetch_all(
-            "SELECT DISTINCT lot_name FROM products WHERE telegram_id = ? AND used = 0 ORDER BY lot_name",
+            "SELECT DISTINCT lot_name FROM products WHERE used = 0 AND telegram_id = ? ORDER BY lot_name",
             (telegram_id,)
         )
         return [row["lot_name"] for row in rows]
 
-    # ------------------ ЗАКАЗЫ (привязаны к пользователю) ------------------
-    async def add_order(self, telegram_id: int, order_id: str, buyer: str, lot_name: str = "", amount: float = 0, currency: str = "RUB", status: str = "new") -> bool:
-        try:
-            await self.execute(
-                "INSERT OR IGNORE INTO orders (telegram_id, order_id, buyer, lot_name, amount, currency, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (telegram_id, order_id, buyer, lot_name, amount, currency, status),
-            )
-            return True
-        except Exception as e:
-            logger.error(f"add_order error: {e}")
-            return False
-
-    async def mark_delivered(self, telegram_id: int, order_id: str) -> None:
-        await self.execute(
-            "UPDATE orders SET delivered = 1, delivered_at = datetime('now'), status = 'delivered' WHERE telegram_id = ? AND order_id = ?",
-            (telegram_id, order_id),
-        )
-
-    async def is_order_known(self, telegram_id: int, order_id: str) -> bool:
-        row = await self.fetch_one(
-            "SELECT 1 FROM orders WHERE telegram_id = ? AND order_id = ?",
-            (telegram_id, order_id)
-        )
-        return row is not None
-
-    async def get_stats(self, telegram_id: int, period: str = "all") -> dict[str, Any]:
+    # ------------------ СТАТИСТИКА ------------------
+    async def get_stats(self, period: str = "all", telegram_id: int = 0) -> dict[str, Any]:
+        """
+        Возвращает статистику по заказам. Если telegram_id == 0 — по всем, иначе по конкретному пользователю.
+        """
         now = datetime.utcnow()
         if period == "day":
             since = (now - timedelta(days=1)).isoformat()
@@ -252,14 +275,25 @@ class Database:
             since = (now - timedelta(days=30)).isoformat()
         else:
             since = "2000-01-01T00:00:00"
-        row = await self.fetch_one(
-            "SELECT COUNT(*) as cnt, COALESCE(SUM(amount), 0) as total FROM orders WHERE telegram_id = ? AND created_at >= ?",
-            (telegram_id, since)
-        )
-        d_row = await self.fetch_one(
-            "SELECT COUNT(*) as cnt FROM orders WHERE telegram_id = ? AND delivered = 1 AND created_at >= ?",
-            (telegram_id, since)
-        )
+
+        if telegram_id == 0:
+            row = await self.fetch_one(
+                "SELECT COUNT(*) as cnt, COALESCE(SUM(amount), 0) as total FROM orders WHERE created_at >= ?",
+                (since,)
+            )
+            d_row = await self.fetch_one(
+                "SELECT COUNT(*) as cnt FROM orders WHERE delivered = 1 AND created_at >= ?",
+                (since,)
+            )
+        else:
+            row = await self.fetch_one(
+                "SELECT COUNT(*) as cnt, COALESCE(SUM(amount), 0) as total FROM orders WHERE created_at >= ? AND telegram_id = ?",
+                (since, telegram_id)
+            )
+            d_row = await self.fetch_one(
+                "SELECT COUNT(*) as cnt FROM orders WHERE delivered = 1 AND created_at >= ? AND telegram_id = ?",
+                (since, telegram_id)
+            )
         return {
             "period": period,
             "orders": row["cnt"] if row else 0,
@@ -268,10 +302,10 @@ class Database:
         }
 
     # ------------------ ЛОГ СООБЩЕНИЙ ------------------
-    async def log_message(self, telegram_id: int, node_id: str, sender: str, text: str, replied: bool = False) -> None:
+    async def log_message(self, node_id: str, sender: str, text: str, replied: bool = False) -> None:
         await self.execute(
-            "INSERT INTO messages_log (telegram_id, node_id, sender, text, replied) VALUES (?, ?, ?, ?, ?)",
-            (telegram_id, node_id, sender, text, int(replied)),
+            "INSERT INTO messages_log (node_id, sender, text, replied) VALUES (?, ?, ?, ?)",
+            (node_id, sender, text, int(replied)),
         )
 
     async def close(self) -> None:

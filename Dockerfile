@@ -2,12 +2,17 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Копируем requirements.txt и устанавливаем зависимости
-COPY requirements.txt .
+# Копируем всё из папки funpay_cortex в /app
+COPY funpay_cortex/ .
+
+# Копируем requirements.txt (если он в корне репозитория, не в папке)
+COPY funpay_cortex/requirements.txt .
+
+# Устанавливаем зависимости
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем весь проект
-COPY . .
+# Проверяем, что файлы скопировались
+RUN ls -la /app/
 
 # Запускаем бота
 CMD ["python", "main.py"]

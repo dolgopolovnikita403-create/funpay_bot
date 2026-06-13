@@ -1,5 +1,6 @@
 """Асинхронный клиент для FunPay (работает с конкретным golden_key)."""
 import logging
+import json
 import requests
 from bs4 import BeautifulSoup
 from FunPayAPI import Account
@@ -78,6 +79,68 @@ class FunPayAPI:
             chats = self.account.request_chats()
             return [{"node_id": str(c.id), "sender": c.name, "last_message": c.last_message_text, "unread": c.unread} for c in chats]
         except Exception as e:
+            return []
+
+    async def get_chat_history(self, chat_id: int, limit: int = 10):
+        """Получает историю чата через прямой запрос к API (метод, используемый в auto_responder)."""
+        if not self.account:
+            await self.fetch_profile()
+        if not self.account.csrf_token:
+            logger.error("Нет CSRF токена")
+            return []
+
+        try:
+            objects = [{
+                "type": "chat_node",
+                "id": chat_id,
+                "tag": "00000000",
+                "data": {
+                    "node": chat_id,
+                    "last_message": -1,
+                    "content": ""
+                }
+            }]
+            payload = {
+                "objects": json.dumps(objects),
+                "request": False,
+                "csrf_token": self.account.csrf_token
+            }
+            headers = {
+                "accept": "*/*",
+                "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "x-requested-with": "XMLHttpRequest",
+                "cookie": f"golden_key={self.golden_key}",
+                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+            response = requests.post("https://funpay.com/runner/", data=payload, headers=headers, timeout=10)
+            if response.status_code != 200:
+                logger.error(f"Ошибка runner: {response.status_code}")
+                return []
+
+            data = response.json()
+            messages = []
+            for obj in data.get("objects", []):
+                if obj.get("type") == "chat_node" and obj.get("data", {}).get("messages"):
+                    for msg in obj["data"]["messages"]:
+                        html_content = msg.get("html", "")
+                        if not html_content:
+                            continue
+                        soup = BeautifulSoup(html_content, "html.parser")
+                        text_div = soup.find("div", {"class": "message-text"})
+                        if text_div:
+                            text = text_div.get_text(strip=True)
+                            if text:
+                                messages.append({
+                                    "id": msg.get("id"),
+                                    "author_id": msg.get("author"),
+                                    "text": text,
+                                })
+            if messages:
+                logger.debug(f"Получено {len(messages)} сообщений из чата {chat_id}")
+                return messages[-limit:]
+            return []
+        except Exception as e:
+            logger.error(f"Ошибка получения истории чата {chat_id}: {e}")
             return []
 
     async def keep_alive(self):

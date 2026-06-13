@@ -145,7 +145,7 @@ class Database:
     async def get_active_users(self) -> list[dict]:
         return await self.fetch_all("SELECT * FROM bot_users WHERE subscription_end > datetime('now')")
 
-    # ------------------ ЗАКАЗЫ И ТОВАРЫ (как раньше) ------------------
+    # ------------------ ЗАКАЗЫ ------------------
     async def add_order(self, order_id: str, buyer: str, lot_name: str = "", amount: float = 0, currency: str = "RUB", status: str = "new") -> bool:
         try:
             await self.execute(
@@ -158,19 +158,26 @@ class Database:
             return False
 
     async def mark_delivered(self, order_id: str) -> None:
-        await self.execute("UPDATE orders SET delivered = 1, delivered_at = datetime('now'), status = 'delivered' WHERE order_id = ?", (order_id,))
+        await self.execute(
+            "UPDATE orders SET delivered = 1, delivered_at = datetime('now'), status = 'delivered' WHERE order_id = ?",
+            (order_id,),
+        )
 
     async def is_order_known(self, order_id: str) -> bool:
         row = await self.fetch_one("SELECT 1 FROM orders WHERE order_id = ?", (order_id,))
         return row is not None
 
+    # ------------------ ТОВАРЫ ------------------
     async def add_product(self, lot_name: str, content: str) -> int:
         await self.execute("INSERT INTO products (lot_name, content) VALUES (?, ?)", (lot_name, content))
         row = await self.fetch_one("SELECT last_insert_rowid() as id")
         return row["id"] if row else 0
 
     async def get_product(self, lot_name: str) -> str | None:
-        row = await self.fetch_one("SELECT id, content FROM products WHERE lot_name = ? AND used = 0 ORDER BY id ASC LIMIT 1", (lot_name,))
+        row = await self.fetch_one(
+            "SELECT id, content FROM products WHERE lot_name = ? AND used = 0 ORDER BY id ASC LIMIT 1",
+            (lot_name,),
+        )
         if not row:
             return None
         await self.execute("UPDATE products SET used = 1 WHERE id = ?", (row["id"],))
@@ -185,8 +192,9 @@ class Database:
 
     async def get_all_lot_names(self) -> list[str]:
         rows = await self.fetch_all("SELECT DISTINCT lot_name FROM products WHERE used = 0 ORDER BY lot_name")
-        return [r["lot_name"] for r in rows]
+        return [row["lot_name"] for row in rows]
 
+    # ------------------ СТАТИСТИКА ------------------
     async def get_stats(self, period: str = "all") -> dict[str, Any]:
         now = datetime.utcnow()
         since = "2000-01-01T00:00:00"
@@ -205,8 +213,12 @@ class Database:
             "delivered": d_row["cnt"] if d_row else 0,
         }
 
+    # ------------------ ЛОГ СООБЩЕНИЙ ------------------
     async def log_message(self, node_id: str, sender: str, text: str, replied: bool = False) -> None:
-        await self.execute("INSERT INTO messages_log (node_id, sender, text, replied) VALUES (?, ?, ?, ?)", (node_id, sender, text, int(replied)))
+        await self.execute(
+            "INSERT INTO messages_log (node_id, sender, text, replied) VALUES (?, ?, ?, ?)",
+            (node_id, sender, text, int(replied)),
+        )
 
     async def close(self) -> None:
         pass

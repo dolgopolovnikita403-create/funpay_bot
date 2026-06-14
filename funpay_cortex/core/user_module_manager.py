@@ -1,7 +1,9 @@
-# core/user_module_manager.py
+"""Менеджер фоновых задач для каждого пользователя."""
+from __future__ import annotations
+
 import asyncio
 import logging
-from typing import Dict
+from typing import Dict, Optional
 
 from core.database import Database
 from core.funpay_api import FunPayAPI
@@ -11,6 +13,7 @@ from core.auto_bump import AutoBump
 from core.online_keeper import OnlineKeeper
 
 logger = logging.getLogger("UserModuleManager")
+
 
 class UserModuleManager:
     def __init__(self, db: Database):
@@ -37,8 +40,8 @@ class UserModuleManager:
             logger.error(f"Не удалось инициализировать FunPay для {telegram_id}")
             return
 
-        # Создаём модули с правильными аргументами
-        auto_responder = AutoResponder(config, funpay, self.db, telegram_id)
+        # Создаём модули
+        auto_responder = AutoResponder(config, self.db, funpay, telegram_id)
         auto_delivery = AutoDelivery(config, self.db, funpay, telegram_id)
         auto_bump = AutoBump(config, self.db, funpay, telegram_id)
         online_keeper = OnlineKeeper(config, self.db, funpay, telegram_id)
@@ -75,6 +78,7 @@ class UserModuleManager:
         if telegram_id in self.keepers:
             await self.keepers[telegram_id].stop()
             del self.keepers[telegram_id]
+
         if telegram_id in self.tasks:
             self.tasks[telegram_id].cancel()
             try:
@@ -84,8 +88,8 @@ class UserModuleManager:
             del self.tasks[telegram_id]
         logger.info(f"🛑 Остановлены модули для {telegram_id}")
 
-    async def restart_module(self, telegram_id: int, module_name: str):
-        """Перезапускает конкретный модуль."""
+    async def restart_module(self, telegram_id: int, module_name: str) -> None:
+        """Перезапускает конкретный модуль для пользователя."""
         if module_name == "auto_responder" and telegram_id in self.responders:
             await self.responders[telegram_id].stop()
             await self.responders[telegram_id].start()
@@ -114,13 +118,27 @@ class UserModuleManager:
                         await self.responders[telegram_id].start()
                     else:
                         await self.responders[telegram_id].stop()
-                # аналогично для других модулей...
+                if telegram_id in self.deliveries and new_state["auto_delivery"] != last_state.get("auto_delivery"):
+                    if new_state["auto_delivery"]:
+                        await self.deliveries[telegram_id].start()
+                    else:
+                        await self.deliveries[telegram_id].stop()
+                if telegram_id in self.bumps and new_state["auto_bump"] != last_state.get("auto_bump"):
+                    if new_state["auto_bump"]:
+                        await self.bumps[telegram_id].start()
+                    else:
+                        await self.bumps[telegram_id].stop()
+                if telegram_id in self.keepers and new_state["online_keeper"] != last_state.get("online_keeper"):
+                    if new_state["online_keeper"]:
+                        await self.keepers[telegram_id].start()
+                    else:
+                        await self.keepers[telegram_id].stop()
                 last_state = new_state
                 await asyncio.sleep(10)
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Мониторинг {telegram_id}: {e}")
+                logger.error(f"Ошибка мониторинга {telegram_id}: {e}")
                 await asyncio.sleep(30)
 
     async def start_all_active_users(self, config) -> None:
